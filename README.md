@@ -159,11 +159,11 @@ Use either one-line form after replacing the example URL with the actual raw
 URL where `remote-install.sh` is hosted:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
 ```
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
 ```
 
 The Synaptics EULA prompt reads directly from the terminal, so it remains
