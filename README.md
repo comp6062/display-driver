@@ -155,8 +155,7 @@ The remote flow is fixed in this order:
 4. stop immediately if any safety check fails;
 5. run the normal interactive installation only after the check passes.
 
-Use either one-line form after replacing the example URL with the actual raw
-URL where `remote-install.sh` is hosted:
+Use either one-line form from the `comp6062/display-driver` repository:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash

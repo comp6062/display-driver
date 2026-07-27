@@ -30,6 +30,7 @@ NO_START=0
 WORK_DIR=""
 LOG_FILE=""
 EVDI_VERSION=""
+EVDI_LIBRARY_DIR=""
 
 PROTECTED_PATHS=(
   "/etc/lightdm"
@@ -75,7 +76,7 @@ warn() {
 
 die() {
   log "ERROR: $*" >&2
-  exit 1
+  return 1
 }
 
 version_lt() {
@@ -440,7 +441,7 @@ record_dependency_state() {
 
 install_dependencies() {
   local dependencies=(
-    ca-certificates curl unzip dkms build-essential binutils
+    ca-certificates curl unzip dkms build-essential binutils pkg-config
     libdrm-dev libelf-dev libusb-1.0-0 libstdc++6 usbutils
   )
   record_dependency_state "${STATE_DIR}/dependencies-before.tsv" "${dependencies[@]}"
@@ -535,6 +536,7 @@ extract_evdi_version() {
 
 install_evdi() {
   local source_archive source_extract dkms_conf source_root destination kernel
+  local library_makefile jobs
   source_archive="$(find "${WORK_DIR}/payload" -type f \
     \( -iname 'evdi*.tar.gz' -o -iname 'evdi*.tgz' \) -print -quit)"
   source_extract="${WORK_DIR}/evdi-source"
@@ -562,6 +564,17 @@ install_evdi() {
   depmod -a "$kernel"
   modinfo -k "$kernel" evdi >/dev/null \
     || die "EVDI was built but is not discoverable by modprobe."
+
+  library_makefile="$(find "$source_extract" -type f -path '*/library/Makefile' -print -quit)"
+  [[ -n "$library_makefile" ]] \
+    || die "EVDI source does not contain the libevdi library Makefile."
+  EVDI_LIBRARY_DIR="$(dirname -- "$library_makefile")"
+  jobs="$(nproc 2>/dev/null || printf '1')"
+
+  log "Building libevdi ${EVDI_VERSION} from the bundled EVDI source."
+  make -C "$EVDI_LIBRARY_DIR" -j"$jobs"
+  compgen -G "${EVDI_LIBRARY_DIR}/libevdi.so*" >/dev/null \
+    || die "The EVDI library build did not produce libevdi.so."
 }
 
 is_aarch64_elf() {
@@ -584,6 +597,13 @@ install_userspace_driver() {
   install -d -m 0755 "$INSTALL_ROOT"
   cp -a -- "${arch_dir}/." "${INSTALL_ROOT}/"
 
+  [[ -d "$EVDI_LIBRARY_DIR" ]] \
+    || die "The built libevdi library directory is unavailable."
+  while IFS= read -r -d '' candidate; do
+    cp -a -- "$candidate" "${INSTALL_ROOT}/$(basename -- "$candidate")"
+  done < <(find "$EVDI_LIBRARY_DIR" -maxdepth 1 \
+    \( -type f -o -type l \) -name 'libevdi.so*' -print0)
+
   while IFS= read -r -d '' firmware; do
     cp -a -- "$firmware" "${INSTALL_ROOT}/$(basename -- "$firmware")"
   done < <(find "${WORK_DIR}/payload" -type f -name '*.spkg' -print0)
@@ -602,7 +622,7 @@ install_userspace_driver() {
   [[ -x "${INSTALL_ROOT}/DisplayLinkManager" ]] \
     || die "DisplayLinkManager was not installed correctly."
   compgen -G "${INSTALL_ROOT}/libevdi.so*" >/dev/null \
-    || die "The AArch64 libevdi library was not found beside DisplayLinkManager."
+    || die "The built libevdi library was not installed beside DisplayLinkManager."
 
   if readelf -l "${INSTALL_ROOT}/DisplayLinkManager" 2>/dev/null | grep -q INTERP; then
     if ! LD_LIBRARY_PATH="$INSTALL_ROOT" ldd "${INSTALL_ROOT}/DisplayLinkManager" \
