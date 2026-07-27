@@ -4,7 +4,7 @@ IFS=$'\n\t'
 umask 022
 
 PACKAGE_NAME="aoc-i1659fwux-rpi-displaylink"
-PACKAGE_VERSION="0.2.0"
+PACKAGE_VERSION="0.2.1"
 DISPLAYLINK_RELEASE="6.3"
 DISPLAYLINK_ZIP_SHA256="7269856c7527060c513215ce1b5a36fef074d8e89cab89bcab13df342acce098"
 DISPLAYLINK_ZIP_URL="https://www.synaptics.com/sites/default/files/exe_files/2026-06/DisplayLink%20USB%20Graphics%20Software%20for%20Ubuntu6.3-EXE.zip"
@@ -415,10 +415,12 @@ check_existing_install() {
 }
 
 accept_eula() {
-  local answer
+  local answer tty_input="/dev/tty"
   printf '\nThe proprietary DisplayLink user-space files are governed by the Synaptics EULA:\n%s\n\n' \
     "${DISPLAYLINK_EULA_URL}"
-  read -r -p "Type AGREE to confirm that you reviewed and accept the EULA: " answer
+  [[ -r "$tty_input" ]] \
+    || die "An interactive terminal is required to review and accept the Synaptics EULA."
+  read -r -p "Type AGREE to confirm that you reviewed and accept the EULA: " answer < "$tty_input"
   [[ "$answer" == "AGREE" ]] || die "EULA not accepted; no system changes were made."
 }
 

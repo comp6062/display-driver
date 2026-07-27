@@ -19,7 +19,7 @@ DisplayLink installation scripts.
 
 The bundle has been statically reviewed and its Bash scripts pass syntax and
 safety-pattern checks. It has **not** been run against every Raspberry Pi OS,
-kernel, compositor, and physical I1659FWUX combination. Treat version 0.2.0 as
+kernel, compositor, and physical I1659FWUX combination. Treat version 0.2.1 as
 an engineering-validation package until it passes the hardware checklist below
 on your own Pi.
 
@@ -141,6 +141,42 @@ The official runtime contains device firmware. If the connected monitor needs a
 firmware update, DisplayLinkManager may apply it automatically; the screen can
 take several extra seconds to appear on the first connection afterward.
 
+## One-command remote installation
+
+The included `remote-install.sh` is a self-contained, publish-ready installer.
+Only that one file needs to be placed at a raw HTTPS URL, such as a GitHub raw
+file or release asset. It contains a checksummed copy of this package.
+
+The remote flow is fixed in this order:
+
+1. unpack the embedded package into a temporary directory;
+2. verify the embedded payload SHA-256;
+3. run `install.sh --check-only` without changing the system;
+4. stop immediately if any safety check fails;
+5. run the normal interactive installation only after the check passes.
+
+Use either one-line form after replacing the example URL with the actual raw
+URL where `remote-install.sh` is hosted:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh | sudo bash
+```
+
+```bash
+wget -qO- https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh | sudo bash
+```
+
+The Synaptics EULA prompt reads directly from the terminal, so it remains
+interactive even though the installer script itself arrives through a pipe.
+The remote wrapper creates only temporary files before the safety check and
+removes them when it exits.
+
+The same wrapper can be tested locally before publishing:
+
+```bash
+sudo ./remote-install.sh
+```
+
 ## Before installation
 
 Remove any existing DisplayLink or EVDI installation first. The installer will
@@ -150,8 +186,8 @@ rollback unreliable.
 Run the no-change compatibility check:
 
 ```bash
-unzip aoc-i1659fwux-rpi-displaylink-driver-0.2.0.zip
-cd aoc-i1659fwux-rpi-displaylink-driver-0.2.0
+unzip aoc-i1659fwux-rpi-displaylink-driver-0.2.1.zip
+cd aoc-i1659fwux-rpi-displaylink-driver-0.2.1
 sudo ./install.sh --check-only
 ```
 

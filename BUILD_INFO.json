@@ -1,6 +1,6 @@
 {
-  "package": "aoc-i1659fwux-rpi-displaylink-driver-0.2.0",
-  "version": "0.2.0",
+  "package": "aoc-i1659fwux-rpi-displaylink-driver-0.2.1",
+  "version": "0.2.1",
   "displaylink_release": "6.3",
   "source_mode": "official Synaptics archive downloaded or supplied unmodified at install time",
   "installation_method": "manual minimal extraction; generic vendor installer is not executed",
@@ -16,5 +16,6 @@
   "generated": "2026-07-26",
   "hardware_validation": "required",
   "displaylink_build": "6.3.0-48",
-  "displaylink_archive_sha256": "7269856c7527060c513215ce1b5a36fef074d8e89cab89bcab13df342acce098"
+  "displaylink_archive_sha256": "7269856c7527060c513215ce1b5a36fef074d8e89cab89bcab13df342acce098",
+  "remote_install": "self-contained remote-install.sh runs check-only before installation"
 }

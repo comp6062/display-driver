@@ -1,13 +1,13 @@
 # Validation record
 
-Package: `aoc-i1659fwux-rpi-displaylink-driver-0.2.0`  
+Package: `aoc-i1659fwux-rpi-displaylink-driver-0.2.1`  
 Validation date: 2026-07-26
 
 ## Passed checks
 
-- Bash syntax for `install.sh`, `uninstall.sh`, and `status.sh`.
+- Bash syntax for `install.sh`, `uninstall.sh`, `status.sh`, and the self-contained `remote-install.sh`.
 - `BUILD_INFO.json` parsing.
-- Executable permissions on all three entry-point scripts.
+- Executable permissions on all four entry-point scripts.
 - Kernel-version comparison helpers.
 - EVDI DKMS version parsing.
 - ELF architecture gate: rejects x86 and accepts AArch64.
@@ -23,6 +23,8 @@ Validation date: 2026-07-26
   configuration, gettys, Raspberry Pi boot configuration, or generic display
   configuration.
 - Help and status-script smoke tests.
+- Remote wrapper payload checksum verification and enforced `--check-only` before installation.
+- EULA input through `/dev/tty` for `curl | sudo bash` and `wget | sudo bash` use.
 
 ## Validation limits
 
