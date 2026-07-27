@@ -1,0 +1,20 @@
+{
+  "package": "aoc-i1659fwux-rpi-displaylink-driver-0.2.0",
+  "version": "0.2.0",
+  "displaylink_release": "6.3",
+  "source_mode": "official Synaptics archive downloaded or supplied unmodified at install time",
+  "installation_method": "manual minimal extraction; generic vendor installer is not executed",
+  "vendor_installer_executed": false,
+  "target_architecture": "aarch64",
+  "target_models": [
+    "Raspberry Pi 4",
+    "Raspberry Pi 5"
+  ],
+  "target_os": "Raspberry Pi OS/Raspbian Debian base",
+  "target_usb_id": "17e9:ff10",
+  "native_resolution": "1920x1080",
+  "generated": "2026-07-26",
+  "hardware_validation": "required",
+  "displaylink_build": "6.3.0-48",
+  "displaylink_archive_sha256": "7269856c7527060c513215ce1b5a36fef074d8e89cab89bcab13df342acce098"
+}
