@@ -2,7 +2,7 @@
 
 A single-file Bash installer for the AOC I1659FWUX USB monitor on 64-bit Raspberry Pi OS/Raspbian running on a Raspberry Pi 4 or Raspberry Pi 5.
 
-The main installer is preserved from the CODELOCK source bundle. The repository adds only the files needed for GitHub distribution and verified remote installation.
+The main installer is the CODELOCK source bundle with the requested extraction fix applied. The repository includes the files needed for GitHub distribution and verified remote installation.
 
 ## Remote installation
 
@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/instal
 wget -qO- https://raw.githubusercontent.com/comp6062/display-driver/main/install.sh | sudo bash
 ```
 
-The remote wrapper downloads the unchanged main installer, verifies its SHA-256 checksum, makes the temporary copy executable, and runs it. The downloaded temporary files are removed when the wrapper exits.
+The remote wrapper downloads the CODELOCK main installer, verifies its SHA-256 checksum, makes the temporary copy executable, and runs it. The downloaded temporary files are removed when the wrapper exits.
 
 The installer displays the Synaptics DisplayLink EULA URL and asks you to type `AGREE` before it downloads or installs the proprietary DisplayLink payload.
 
@@ -151,7 +151,7 @@ SHA256SUMS
 aoc-i1659fwux-rpi4-single-file-installer.sh
 ```
 
-- `aoc-i1659fwux-rpi4-single-file-installer.sh` is the complete CODELOCK installer.
+- `aoc-i1659fwux-rpi4-single-file-installer.sh` is the complete CODELOCK installer with the extraction fix applied.
 - `install.sh` is the verified GitHub remote-install wrapper.
 - `SHA256SUMS` contains checksums for the repository scripts.
 
@@ -161,10 +161,10 @@ aoc-i1659fwux-rpi4-single-file-installer.sh
 sha256sum -c SHA256SUMS
 ```
 
-The expected SHA-256 for the CODELOCK main installer is:
+The expected SHA-256 for the corrected CODELOCK main installer is:
 
 ```text
-272920d4c08a1b4759c30b6efcfb1b71b59c7778e7a1f597f49bfbc4e625d11e
+8f5c2a90fc2154a50dce87590ab7c4118b022c4d6756de76abd6e485c1447244
 ```
 
 ## Important notes

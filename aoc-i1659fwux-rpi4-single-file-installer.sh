@@ -740,7 +740,7 @@ extract_official_payload() {
     log "Extracting official driver components without executing the Ubuntu installer."
     (
         cd "$payload_dir"
-        "$run_file" --noexec --keep >/dev/null
+        "$run_file" --noexec --keep --target "$(basename "${run_file%.run}")" >/dev/null
     )
 
     extracted_root="$(find "$payload_dir" -mindepth 1 -maxdepth 2 -type f -name DisplayLinkManager -printf '%h\n' | grep -E '/(aarch64|arm64)[^/]*/?$' | head -n1 || true)"
