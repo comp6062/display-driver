@@ -1,6 +1,12 @@
-# GitHub remote installation
+# Remote installation
 
-The repository is already configured for:
+Upload every file in this repository ZIP to the root of:
+
+```text
+https://github.com/comp6062/display-driver
+```
+
+Then run either:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
@@ -12,37 +18,13 @@ or:
 wget -qO- https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
 ```
 
-`remote-install.sh` is self-contained. It reconstructs a checksummed embedded
-copy of the package, verifies it, runs `install.sh --check-only`, and proceeds to
-the interactive installation only when the safety check passes.
+The wrapper verifies its embedded package before running anything from it.
 
-The EULA response is read from `/dev/tty`, so `AGREE` can be entered even when
-the script is piped to `sudo bash`.
+When it finds the installed 0.2.2 package with
+`startup=post-login-xdg-autostart-root-broker`, it applies only the direct
+session-detection hotfix. EVDI is not rebuilt and the display manager is not
+restarted. The broker then observes the active local X11/Wayland session through
+`loginctl`, waits 45 seconds for stability, and starts DisplayLink.
 
-## Existing login-loop revision
-
-A Pi with the earlier pre-login EVDI revision must be repaired and rebooted
-before installing this revision:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/repair-login.sh | sudo bash
-sudo reboot
-```
-
-Then run the normal remote installation command and reboot once more.
-
-## Upload layout
-
-Upload all files from the ZIP directly to the root of the
-`comp6062/display-driver` repository. In particular, these files must be at the
-repository root:
-
-```text
-remote-install.sh
-repair-login.sh
-install.sh
-uninstall.sh
-status.sh
-session-broker.sh
-session-request.sh
-```
+On a clean system, the wrapper runs `install.sh --check-only` before the normal
+installation. It stops if the safety check fails.

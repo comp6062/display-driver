@@ -4,7 +4,7 @@ IFS=$'\n\t'
 umask 022
 
 PACKAGE_NAME="aoc-i1659fwux-rpi-displaylink"
-PACKAGE_VERSION="0.2.2"
+PACKAGE_VERSION="0.2.3"
 DISPLAYLINK_RELEASE="6.3"
 DISPLAYLINK_ZIP_SHA256="7269856c7527060c513215ce1b5a36fef074d8e89cab89bcab13df342acce098"
 DISPLAYLINK_ZIP_URL="https://www.synaptics.com/sites/default/files/exe_files/2026-06/DisplayLink%20USB%20Graphics%20Software%20for%20Ubuntu6.3-EXE.zip"
@@ -20,10 +20,6 @@ SAFE_UNIT_PATH="/etc/systemd/system/${SAFE_UNIT}"
 UDEV_RULE_PATH="/etc/udev/rules.d/99-aoc-i1659fwux-displaylink.rules"
 MODULE_LOAD_PATH="/etc/modules-load.d/aoc-i1659fwux-evdi.conf"
 EVDI_MODPROBE_PATH="/etc/modprobe.d/evdi.conf"
-AUTOSTART_PATH="/etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop"
-SESSION_BROKER_PATH="${INSTALL_ROOT}/aoc-session-broker.sh"
-SESSION_REQUEST_PATH="${INSTALL_ROOT}/aoc-session-request.sh"
-RUNTIME_DIR="/run/aoc-i1659fwux-displaylink"
 BUNDLE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_VENDOR_ZIP="${BUNDLE_DIR}/vendor/DisplayLink-USB-Graphics-Software-for-Ubuntu-6.3.zip"
 
@@ -247,9 +243,7 @@ restore_evdi_config() {
 
 remove_partial_driver() {
   systemctl disable --now "${SAFE_UNIT}" >/dev/null 2>&1 || true
-  pkill -TERM -f '^/opt/displaylink/DisplayLinkManager$' >/dev/null 2>&1 || true
-  rm -f -- "${SAFE_UNIT_PATH}" "${AUTOSTART_PATH}"
-  rm -rf -- "${RUNTIME_DIR}"
+  rm -f -- "${SAFE_UNIT_PATH}"
   systemctl daemon-reload >/dev/null 2>&1 || true
 
   modprobe -r evdi >/dev/null 2>&1 || true
@@ -270,6 +264,10 @@ remove_partial_driver() {
   fi
 
   rm -rf -- "${INSTALL_ROOT}"
+  rm -f -- /etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop
+  rm -f -- /usr/local/libexec/aoc-i1659fwux-session-request.sh
+  rm -f -- /usr/local/bin/aoc-i1659fwux-session-request
+  rm -rf -- /run/aoc-i1659fwux-displaylink
   restore_evdi_config
   systemctl daemon-reload >/dev/null 2>&1 || true
 }
@@ -364,7 +362,6 @@ collect_conflicts() {
   [[ -e "${SAFE_UNIT_PATH}" ]] && result_ref+=("${SAFE_UNIT_PATH}")
   [[ -e "${UDEV_RULE_PATH}" ]] && result_ref+=("${UDEV_RULE_PATH}")
   [[ -e "${MODULE_LOAD_PATH}" ]] && result_ref+=("${MODULE_LOAD_PATH}")
-  [[ -e "${AUTOSTART_PATH}" ]] && result_ref+=("${AUTOSTART_PATH}")
   [[ -L /usr/bin/displaylink-installer || -e /usr/bin/displaylink-installer ]] \
     && result_ref+=("/usr/bin/displaylink-installer")
 
@@ -646,37 +643,20 @@ install_userspace_driver() {
   log "Installed only the AArch64 DisplayLink user-space files required by this monitor."
 }
 
-install_session_bridge() {
-  [[ -x "${BUNDLE_DIR}/session-broker.sh" ]] \
-    || die "The root session broker is missing or not executable."
-  [[ -x "${BUNDLE_DIR}/session-request.sh" ]] \
-    || die "The desktop session requester is missing or not executable."
-
-  # Remove only this package's old pre-login activation files. New installs do
-  # not preload EVDI and do not create any DRM device at the LightDM greeter.
+configure_evdi_module() {
+  # Do not preload EVDI and do not pre-create a virtual DRM device.  Both
+  # actions expose the USB display to LightDM before authentication and can
+  # alter the normal login/autologin path.  The post-login broker loads EVDI
+  # dynamically only after a verified local graphical user session is stable.
   rm -f -- "${MODULE_LOAD_PATH}"
+
   if [[ -f "${EVDI_MODPROBE_PATH}" ]] \
-      && grep -Fq 'AOC I1659FWUX' "${EVDI_MODPROBE_PATH}" \
-      && grep -Fq 'initial_device_count=1' "${EVDI_MODPROBE_PATH}"; then
+      && grep -Fqx '# AOC I1659FWUX: create one EVDI DRM device before the compositor starts.' "${EVDI_MODPROBE_PATH}" \
+      && grep -Fqx 'options evdi initial_device_count=1' "${EVDI_MODPROBE_PATH}"; then
     rm -f -- "${EVDI_MODPROBE_PATH}"
   fi
 
-  install -m 0755 "${BUNDLE_DIR}/session-broker.sh" "${SESSION_BROKER_PATH}"
-  install -m 0755 "${BUNDLE_DIR}/session-request.sh" "${SESSION_REQUEST_PATH}"
-  install -d -m 0755 "$(dirname -- "${AUTOSTART_PATH}")"
-  cat > "${AUTOSTART_PATH}" <<AUTOSTART
-[Desktop Entry]
-Type=Application
-Name=AOC I1659FWUX DisplayLink Session Request
-Comment=Start the USB monitor only after the authenticated desktop is fully running
-Exec=${SESSION_REQUEST_PATH}
-Terminal=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-AUTOSTART
-  chmod 0644 "${AUTOSTART_PATH}"
   depmod -a
-  log "Installed the post-login session bridge. EVDI remains absent from LightDM."
 }
 
 install_exact_udev_rule() {
@@ -690,18 +670,30 @@ UDEV
 }
 
 install_safe_service() {
+  [[ -x "${BUNDLE_DIR}/session-broker.sh" ]] \
+    || die "session-broker.sh is missing or not executable."
+  install -m 0755 "${BUNDLE_DIR}/session-broker.sh" \
+    "${INSTALL_ROOT}/aoc-session-broker.sh"
+
+  # Remove only obsolete files from this package's previous request-file
+  # design. Raspberry Pi OS labwc did not execute that XDG helper reliably.
+  rm -f -- /etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop
+  rm -f -- /usr/local/libexec/aoc-i1659fwux-session-request.sh
+  rm -f -- /usr/local/bin/aoc-i1659fwux-session-request
+  rm -rf -- /run/aoc-i1659fwux-displaylink
+
   cat > "${SAFE_UNIT_PATH}" <<UNIT
 [Unit]
 Description=AOC I1659FWUX post-login DisplayLink broker
 Documentation=${DISPLAYLINK_EULA_URL}
 After=display-manager.service systemd-user-sessions.service
 Wants=systemd-user-sessions.service
-ConditionPathExists=${SESSION_BROKER_PATH}
+ConditionPathExists=${INSTALL_ROOT}/aoc-session-broker.sh
 ConditionPathExists=${INSTALL_ROOT}/DisplayLinkManager
 
 [Service]
 Type=simple
-ExecStart=${SESSION_BROKER_PATH}
+ExecStart=${INSTALL_ROOT}/aoc-session-broker.sh
 WorkingDirectory=${INSTALL_ROOT}
 Restart=on-failure
 RestartSec=5
@@ -713,12 +705,12 @@ UNIT
   chmod 0644 "${SAFE_UNIT_PATH}"
   systemctl daemon-reload
   systemctl enable "${SAFE_UNIT}" >/dev/null
-  log "Installed a broker service that never loads EVDI or DisplayLinkManager at the greeter."
+  log "Installed the direct loginctl session broker; EVDI remains inactive at LightDM."
 }
 
 start_and_verify() {
   if (( NO_START == 0 )); then
-    systemctl start "${SAFE_UNIT}"
+    systemctl restart "${SAFE_UNIT}"
   fi
 
   if systemctl is-active --quiet "${SAFE_UNIT}"; then
@@ -728,28 +720,16 @@ start_and_verify() {
     die "The post-login DisplayLink broker did not remain active."
   fi
 
-  [[ ! -e "${MODULE_LOAD_PATH}" ]] \
-    || die "The legacy pre-login EVDI module-load file still exists."
-  if [[ -f "${EVDI_MODPROBE_PATH}" ]] \
-      && grep -Fq 'AOC I1659FWUX' "${EVDI_MODPROBE_PATH}" \
-      && grep -Fq 'initial_device_count=1' "${EVDI_MODPROBE_PATH}"; then
-    die "The legacy pre-created EVDI device configuration still exists."
+  if command -v lsmod >/dev/null 2>&1 \
+      && lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
+    warn "EVDI was already loaded before the new broker started. A normal reboot is recommended to begin with EVDI absent at LightDM."
   fi
 
-  if lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
-    warn "EVDI is already loaded by another process. This package did not load it during installation."
+  if command -v lsusb >/dev/null 2>&1 && lsusb -d "${AOC_USB_ID}" >/dev/null 2>&1; then
+    log "The AOC USB monitor is connected. The broker will activate it only after a local graphical session remains stable for 45 seconds."
   else
-    log "Verified: EVDI is not loaded during installation or at the LightDM greeter."
+    warn "The AOC monitor is not connected. It may be connected after the authenticated desktop starts."
   fi
-
-  if pgrep -f '^/opt/displaylink/DisplayLinkManager$' >/dev/null 2>&1; then
-    warn "DisplayLinkManager was already running. This package does not start it until a desktop autostart request exists."
-  else
-    log "Verified: DisplayLinkManager is not running before the authenticated desktop request."
-  fi
-
-  log "The monitor will start about 35 seconds after the next authenticated desktop session begins."
-  log "If the driver causes that session to disappear within 60 seconds, it is blocked for the rest of that boot to prevent a login loop."
 }
 
 write_install_metadata() {
@@ -765,11 +745,15 @@ kernel=$(uname -r)
 architecture=$(uname -m)
 model=$(read_pi_model)
 method=manual-minimal-extraction-no-vendor-installer
-startup=post-login-xdg-autostart-root-broker
+startup=post-login-loginctl-stable-session-broker
+stable_session_delay_seconds=45
 INFO
   cp -a -- "${BUNDLE_DIR}/uninstall.sh" "${STATE_DIR}/uninstall.sh"
   cp -a -- "${BUNDLE_DIR}/status.sh" "${STATE_DIR}/status.sh"
-  cp -a -- "${BUNDLE_DIR}/repair-login.sh" "${STATE_DIR}/repair-login.sh"
+  cp -a -- "${BUNDLE_DIR}/session-broker.sh" "${STATE_DIR}/session-broker.sh"
+  if [[ -x "${BUNDLE_DIR}/apply-session-detection-fix.sh" ]]; then
+    cp -a -- "${BUNDLE_DIR}/apply-session-detection-fix.sh" "${STATE_DIR}/apply-session-detection-fix.sh"
+  fi
 }
 
 run_check_only() {
@@ -780,13 +764,6 @@ run_check_only() {
     printf '  - %s\n' "${conflicts[@]}" >&2
     return 1
   fi
-
-  command -v loginctl >/dev/null 2>&1 \
-    || die "loginctl is required to keep DisplayLink isolated from LightDM."
-  command -v flock >/dev/null 2>&1 \
-    || die "flock is required for the authenticated desktop request lock."
-  [[ -x "${BUNDLE_DIR}/session-broker.sh" && -x "${BUNDLE_DIR}/session-request.sh" ]] \
-    || die "The post-login session bridge files are missing or not executable."
 
   local kernel
   kernel="$(uname -r)"
@@ -828,7 +805,7 @@ main() {
   download_and_extract
   install_evdi
   install_userspace_driver
-  install_session_bridge
+  configure_evdi_module
   install_exact_udev_rule
   install_safe_service
   verify_and_restore_protected
@@ -841,8 +818,8 @@ main() {
 
   log "Installation completed without running Synaptics' generic system installer."
   log "No login manager, autologin, password, PAM, SSH, boot target, Wayland/X11 selection, X11 configuration, or boot configuration was changed."
-  log "EVDI and DisplayLinkManager remain inactive until the authenticated desktop's XDG autostart request has been stable."
-  log "The installer did not reboot the Raspberry Pi. Reboot normally so the new post-login startup path is used."
+  log "EVDI and DisplayLinkManager remain inactive at LightDM and start only after a stable authenticated desktop session."
+  log "The installer did not reboot the Raspberry Pi."
   log "Status: sudo ${STATE_DIR}/status.sh"
   log "Uninstall: sudo ${STATE_DIR}/uninstall.sh"
 }

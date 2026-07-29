@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+BROKER_SHA256="c7f0bc26b957efdf88cbdd7a20967b4a9e017dbed0d3ee0511069936f4af997d"
+BROKER_SIZE="7389"
+INSTALL_ROOT="/opt/displaylink"
+BROKER_PATH="${INSTALL_ROOT}/aoc-session-broker.sh"
+SAFE_UNIT="aoc-i1659fwux-displaylink.service"
+SAFE_UNIT_PATH="/etc/systemd/system/${SAFE_UNIT}"
+STATE_DIR="/var/lib/aoc-i1659fwux-rpi-displaylink"
+MODULE_LOAD_PATH="/etc/modules-load.d/aoc-i1659fwux-evdi.conf"
+EVDI_MODPROBE_PATH="/etc/modprobe.d/evdi.conf"
+TEMP_FILE=""
+
+log() {
+  printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"
+}
+
+die() {
+  log "ERROR: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  [[ -n "$TEMP_FILE" ]] && rm -f -- "$TEMP_FILE"
+}
+
+trap cleanup EXIT INT TERM
+[[ ${EUID} -eq 0 ]] || die "Run this hotfix through sudo."
+[[ -x "${INSTALL_ROOT}/DisplayLinkManager" ]] || die "DisplayLinkManager is not installed at ${INSTALL_ROOT}."
+command -v loginctl >/dev/null 2>&1 || die "loginctl is required."
+command -v base64 >/dev/null 2>&1 || die "base64 is required."
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required."
+
+TEMP_FILE="$(mktemp -t aoc-session-broker.XXXXXXXX)"
+base64 --decode > "$TEMP_FILE" <<'AOC_BROKER_PAYLOAD'
+IyEvdXNyL2Jpbi9lbnYgYmFzaApzZXQgLXUKSUZTPSQnXG5cdCcKdW1hc2sgMDIyCgpJTlNUQUxM
+X1JPT1Q9Ii9vcHQvZGlzcGxheWxpbmsiCk1BTkFHRVI9IiR7SU5TVEFMTF9ST09UfS9EaXNwbGF5
+TGlua01hbmFnZXIiCkFPQ19VU0JfSUQ9IjE3ZTk6ZmYxMCIKUlVOVElNRV9ESVI9Ii9ydW4vYW9j
+LWkxNjU5Znd1eC1kaXNwbGF5bGluayIKU1RBVEVfRklMRT0iJHtSVU5USU1FX0RJUn0vYnJva2Vy
+LnN0YXRlIgpCTE9DS19GSUxFPSIke1JVTlRJTUVfRElSfS9ibG9ja2VkLXRoaXMtYm9vdCIKU1RB
+QkxFX1NFQ09ORFM9NDUKUE9MTF9TRUNPTkRTPTIKRUFSTFlfRkFJTFVSRV9TRUNPTkRTPTMwCk1B
+TkFHRVJfUElEPSIiCkFDVElWRV9TRVNTSU9OX0lEPSIiCkFDVElWRV9VSUQ9IiIKQUNUSVZFX1VT
+RVI9IiIKQUNUSVZFX1RZUEU9IiIKU1RBUlRfRVBPQ0g9MApTVE9QX1JFUVVFU1RFRD0wCgpsb2co
+KSB7CiAgcHJpbnRmICdbQU9DIFNFU1NJT04gQlJPS0VSICUoJVktJW0tJWQgJUg6JU06JVMpVF0g
+JXNcbicgLTEgIiQqIgp9Cgp3cml0ZV9zdGF0ZSgpIHsKICBsb2NhbCBzdGF0ZT0kMSBkZXRhaWw9
+JHsyOi19CiAgaW5zdGFsbCAtZCAtbSAwNzU1ICIkUlVOVElNRV9ESVIiCiAgewogICAgcHJpbnRm
+ICdzdGF0ZT0lc1xuJyAiJHN0YXRlIgogICAgcHJpbnRmICdkZXRhaWw9JXNcbicgIiRkZXRhaWwi
+CiAgICBwcmludGYgJ3Nlc3Npb25faWQ9JXNcbicgIiRBQ1RJVkVfU0VTU0lPTl9JRCIKICAgIHBy
+aW50ZiAndWlkPSVzXG4nICIkQUNUSVZFX1VJRCIKICAgIHByaW50ZiAndXNlcj0lc1xuJyAiJEFD
+VElWRV9VU0VSIgogICAgcHJpbnRmICdzZXNzaW9uX3R5cGU9JXNcbicgIiRBQ1RJVkVfVFlQRSIK
+ICAgIHByaW50ZiAnbWFuYWdlcl9waWQ9JXNcbicgIiRNQU5BR0VSX1BJRCIKICAgIHByaW50ZiAn
+dXBkYXRlZD0lc1xuJyAiJChkYXRlIC0taXNvLTg2MDE9c2Vjb25kcykiCiAgfSA+ICIke1NUQVRF
+X0ZJTEV9LnRtcCIKICBjaG1vZCAwNjQ0ICIke1NUQVRFX0ZJTEV9LnRtcCIKICBtdiAtZiAiJHtT
+VEFURV9GSUxFfS50bXAiICIkU1RBVEVfRklMRSIKfQoKc2Vzc2lvbl92YWx1ZSgpIHsKICBsb2dp
+bmN0bCBzaG93LXNlc3Npb24gIiQxIiAtLXByb3BlcnR5PSIkMiIgLS12YWx1ZSAyPi9kZXYvbnVs
+bCB8fCB0cnVlCn0KCm1vbml0b3JfY29ubmVjdGVkKCkgewogIGNvbW1hbmQgLXYgbHN1c2IgPi9k
+ZXYvbnVsbCAyPiYxICYmIGxzdXNiIC1kICIkQU9DX1VTQl9JRCIgPi9kZXYvbnVsbCAyPiYxCn0K
+CmNvbXBvc2l0b3JfcnVubmluZ19mb3JfdWlkKCkgewogIGxvY2FsIHVpZD0kMSBwcm9jZXNzCiAg
+Zm9yIHByb2Nlc3MgaW4gbGFid2Mgd2F5ZmlyZSB3ZXN0b24gc3dheSBnbm9tZS1zaGVsbCBrd2lu
+X3dheWxhbmQgWG9yZyBYd2F5bGFuZDsgZG8KICAgIGlmIHBncmVwIC11ICIkdWlkIiAteCAiJHBy
+b2Nlc3MiID4vZGV2L251bGwgMj4mMTsgdGhlbgogICAgICByZXR1cm4gMAogICAgZmkKICBkb25l
+CiAgcmV0dXJuIDEKfQoKZmluZF9hY3RpdmVfbG9jYWxfZ3JhcGhpY2FsX3Nlc3Npb24oKSB7CiAg
+Y29tbWFuZCAtdiBsb2dpbmN0bCA+L2Rldi9udWxsIDI+JjEgfHwgcmV0dXJuIDEKCiAgbG9jYWwg
+c2lkIHVpZCB1c2VyIGFjdGl2ZSByZW1vdGUgY2xhc3MgdHlwZSBzdGF0ZQogIHdoaWxlIElGUz0g
+cmVhZCAtciBzaWQ7IGRvCiAgICBbWyAtbiAiJHNpZCIgXV0gfHwgY29udGludWUKICAgIGFjdGl2
+ZT0iJChzZXNzaW9uX3ZhbHVlICIkc2lkIiBBY3RpdmUpIgogICAgcmVtb3RlPSIkKHNlc3Npb25f
+dmFsdWUgIiRzaWQiIFJlbW90ZSkiCiAgICBjbGFzcz0iJChzZXNzaW9uX3ZhbHVlICIkc2lkIiBD
+bGFzcykiCiAgICB0eXBlPSIkKHNlc3Npb25fdmFsdWUgIiRzaWQiIFR5cGUpIgogICAgc3RhdGU9
+IiQoc2Vzc2lvbl92YWx1ZSAiJHNpZCIgU3RhdGUpIgogICAgdWlkPSIkKHNlc3Npb25fdmFsdWUg
+IiRzaWQiIFVzZXIpIgogICAgdXNlcj0iJChzZXNzaW9uX3ZhbHVlICIkc2lkIiBOYW1lKSIKCiAg
+ICBbWyAiJGFjdGl2ZSIgPT0gInllcyIgXV0gfHwgY29udGludWUKICAgIFtbICIkcmVtb3RlIiA9
+PSAibm8iIF1dIHx8IGNvbnRpbnVlCiAgICBbWyAiJHN0YXRlIiA9PSAiYWN0aXZlIiBdXSB8fCBj
+b250aW51ZQogICAgW1sgIiRjbGFzcyIgPT0gInVzZXIiIHx8ICIkY2xhc3MiID09ICJ1c2VyLWVh
+cmx5IiBdXSB8fCBjb250aW51ZQogICAgW1sgIiR0eXBlIiA9PSAid2F5bGFuZCIgfHwgIiR0eXBl
+IiA9PSAieDExIiBdXSB8fCBjb250aW51ZQogICAgW1sgIiR1aWQiID1+IF5bMC05XSskIF1dIHx8
+IGNvbnRpbnVlCiAgICBjb21wb3NpdG9yX3J1bm5pbmdfZm9yX3VpZCAiJHVpZCIgfHwgY29udGlu
+dWUKCiAgICBwcmludGYgJyVzfCVzfCVzfCVzXG4nICIkc2lkIiAiJHVpZCIgIiR1c2VyIiAiJHR5
+cGUiCiAgICByZXR1cm4gMAogIGRvbmUgPCA8KGxvZ2luY3RsIGxpc3Qtc2Vzc2lvbnMgLS1uby1s
+ZWdlbmQgMj4vZGV2L251bGwgfCBhd2sgJ3twcmludCAkMX0nKQoKICByZXR1cm4gMQp9CgpzYW1l
+X3Nlc3Npb25faXNfYWN0aXZlKCkgewogIGxvY2FsIHJlc3VsdAogIHJlc3VsdD0iJChmaW5kX2Fj
+dGl2ZV9sb2NhbF9ncmFwaGljYWxfc2Vzc2lvbiAyPi9kZXYvbnVsbCB8fCB0cnVlKSIKICBbWyAt
+biAiJHJlc3VsdCIgXV0gfHwgcmV0dXJuIDEKICBbWyAiJHtyZXN1bHQlJXwqfSIgPT0gIiRBQ1RJ
+VkVfU0VTU0lPTl9JRCIgXV0KfQoKc3RvcF9kcml2ZXIoKSB7CiAgaWYgW1sgLW4gIiRNQU5BR0VS
+X1BJRCIgXV0gJiYga2lsbCAtMCAiJE1BTkFHRVJfUElEIiAyPi9kZXYvbnVsbDsgdGhlbgogICAg
+a2lsbCAtVEVSTSAiJE1BTkFHRVJfUElEIiAyPi9kZXYvbnVsbCB8fCB0cnVlCiAgICBsb2NhbCBj
+b3VudD0wCiAgICB3aGlsZSBraWxsIC0wICIkTUFOQUdFUl9QSUQiIDI+L2Rldi9udWxsICYmICgo
+IGNvdW50IDwgMjUgKSk7IGRvCiAgICAgIHNsZWVwIDAuMgogICAgICAoKGNvdW50KyspKQogICAg
+ZG9uZQogICAga2lsbCAtS0lMTCAiJE1BTkFHRVJfUElEIiAyPi9kZXYvbnVsbCB8fCB0cnVlCiAg
+ICB3YWl0ICIkTUFOQUdFUl9QSUQiIDI+L2Rldi9udWxsIHx8IHRydWUKICBmaQogIE1BTkFHRVJf
+UElEPSIiCgogIGxvY2FsIGF0dGVtcHQKICBmb3IgYXR0ZW1wdCBpbiAxIDIgMyA0IDU7IGRvCiAg
+ICAvc2Jpbi9tb2Rwcm9iZSAtciBldmRpID4vZGV2L251bGwgMj4mMSAmJiBicmVhawogICAgc2xl
+ZXAgMC41CiAgZG9uZQp9CgpyZXF1ZXN0X3N0b3AoKSB7CiAgU1RPUF9SRVFVRVNURUQ9MQogIHdy
+aXRlX3N0YXRlICJzdG9wcGluZyIgInNlcnZpY2Ugc3RvcCByZXF1ZXN0ZWQiCiAgc3RvcF9kcml2
+ZXIKfQoKdHJhcCByZXF1ZXN0X3N0b3AgSU5UIFRFUk0gSFVQCnRyYXAgc3RvcF9kcml2ZXIgRVhJ
+VAoKW1sgJHtFVUlEfSAtZXEgMCBdXSB8fCB7CiAgbG9nICJFUlJPUjogVGhpcyBicm9rZXIgbXVz
+dCBydW4gYXMgcm9vdC4iCiAgZXhpdCAxCn0KW1sgLXggIiRNQU5BR0VSIiBdXSB8fCB7CiAgbG9n
+ICJFUlJPUjogRGlzcGxheUxpbmtNYW5hZ2VyIGlzIG1pc3Npbmcgb3Igbm90IGV4ZWN1dGFibGUu
+IgogIGV4aXQgMQp9CgppbnN0YWxsIC1kIC1tIDA3NTUgIiRSVU5USU1FX0RJUiIKcm0gLWYgLS0g
+IiRCTE9DS19GSUxFIgp3cml0ZV9zdGF0ZSAid2FpdGluZyIgIndhaXRpbmcgZm9yIGEgc3RhYmxl
+IGF1dGhlbnRpY2F0ZWQgbG9jYWwgZ3JhcGhpY2FsIHNlc3Npb24iCmxvZyAiV2FpdGluZyBmb3Ig
+YSBzdGFibGUgYXV0aGVudGljYXRlZCBsb2NhbCBYMTEvV2F5bGFuZCBzZXNzaW9uLiBFVkRJIHJl
+bWFpbnMgaW5hY3RpdmUgYXQgTGlnaHRETS4iCgp3aGlsZSAoKCBTVE9QX1JFUVVFU1RFRCA9PSAw
+ICkpOyBkbwogIGlmIFtbIC1lICIkQkxPQ0tfRklMRSIgXV07IHRoZW4KICAgIHdyaXRlX3N0YXRl
+ICJibG9ja2VkIiAiZHJpdmVyIHN0YXJ0IGNhdXNlZCBhbiBlYXJseSBncmFwaGljYWwtc2Vzc2lv
+biBsb3NzOyBibG9ja2VkIHVudGlsIHJlYm9vdCIKICAgIHNsZWVwICIkUE9MTF9TRUNPTkRTIgog
+ICAgY29udGludWUKICBmaQoKICBzZXNzaW9uX3JlY29yZD0iJChmaW5kX2FjdGl2ZV9sb2NhbF9n
+cmFwaGljYWxfc2Vzc2lvbiAyPi9kZXYvbnVsbCB8fCB0cnVlKSIKICBpZiBbWyAteiAiJHNlc3Np
+b25fcmVjb3JkIiBdXTsgdGhlbgogICAgQUNUSVZFX1NFU1NJT05fSUQ9IiIKICAgIEFDVElWRV9V
+SUQ9IiIKICAgIEFDVElWRV9VU0VSPSIiCiAgICBBQ1RJVkVfVFlQRT0iIgogICAgd3JpdGVfc3Rh
+dGUgIndhaXRpbmciICJubyBhdXRoZW50aWNhdGVkIGxvY2FsIGdyYXBoaWNhbCBzZXNzaW9uIGlz
+IGFjdGl2ZSIKICAgIHNsZWVwICIkUE9MTF9TRUNPTkRTIgogICAgY29udGludWUKICBmaQoKICBJ
+RlM9J3wnIHJlYWQgLXIgY2FuZGlkYXRlX3NpZCBjYW5kaWRhdGVfdWlkIGNhbmRpZGF0ZV91c2Vy
+IGNhbmRpZGF0ZV90eXBlIDw8PCAiJHNlc3Npb25fcmVjb3JkIgogIEFDVElWRV9TRVNTSU9OX0lE
+PSIkY2FuZGlkYXRlX3NpZCIKICBBQ1RJVkVfVUlEPSIkY2FuZGlkYXRlX3VpZCIKICBBQ1RJVkVf
+VVNFUj0iJGNhbmRpZGF0ZV91c2VyIgogIEFDVElWRV9UWVBFPSIkY2FuZGlkYXRlX3R5cGUiCgog
+IGlmICEgbW9uaXRvcl9jb25uZWN0ZWQ7IHRoZW4KICAgIHdyaXRlX3N0YXRlICJ3YWl0aW5nIiAi
+ZGVza3RvcCBpcyBhY3RpdmUgYnV0IEFPQyBVU0IgbW9uaXRvciAke0FPQ19VU0JfSUR9IGlzIG5v
+dCBjb25uZWN0ZWQiCiAgICBzbGVlcCAiJFBPTExfU0VDT05EUyIKICAgIGNvbnRpbnVlCiAgZmkK
+CiAgd3JpdGVfc3RhdGUgInN0YWJpbGlzaW5nIiAiYXV0aGVudGljYXRlZCBkZXNrdG9wIGRldGVj
+dGVkOyB3YWl0aW5nICR7U1RBQkxFX1NFQ09ORFN9IHNlY29uZHMgYmVmb3JlIGRyaXZlciBzdGFy
+dCIKICBsb2cgIkRldGVjdGVkIHNlc3Npb24gJHtBQ1RJVkVfU0VTU0lPTl9JRH0gKCR7QUNUSVZF
+X1VTRVJ9LCAke0FDVElWRV9UWVBFfSk7IHJlcXVpcmluZyAke1NUQUJMRV9TRUNPTkRTfSBzZWNv
+bmRzIG9mIGNvbnRpbnVvdXMgc3RhYmlsaXR5LiIKCiAgc3RhYmxlX2VsYXBzZWQ9MAogIHN0YWJs
+ZV9vaz0xCiAgd2hpbGUgKCggc3RhYmxlX2VsYXBzZWQgPCBTVEFCTEVfU0VDT05EUyApKTsgZG8K
+ICAgICgoIFNUT1BfUkVRVUVTVEVEID09IDAgKSkgfHwgeyBzdGFibGVfb2s9MDsgYnJlYWs7IH0K
+ICAgIHNhbWVfc2Vzc2lvbl9pc19hY3RpdmUgfHwgeyBzdGFibGVfb2s9MDsgYnJlYWs7IH0KICAg
+IG1vbml0b3JfY29ubmVjdGVkIHx8IHsgc3RhYmxlX29rPTA7IGJyZWFrOyB9CiAgICBzbGVlcCAi
+JFBPTExfU0VDT05EUyIKICAgICgoc3RhYmxlX2VsYXBzZWQgKz0gUE9MTF9TRUNPTkRTKSkKICBk
+b25lCiAgKCggc3RhYmxlX29rID09IDEgKSkgfHwgY29udGludWUKCiAgbG9nICJTZXNzaW9uICR7
+QUNUSVZFX1NFU1NJT05fSUR9IHJlbWFpbmVkIHN0YWJsZTsgbG9hZGluZyBFVkRJIGR5bmFtaWNh
+bGx5IHdpdGggbm8gcHJlLWNyZWF0ZWQgZGV2aWNlcy4iCiAgd3JpdGVfc3RhdGUgInN0YXJ0aW5n
+IiAibG9hZGluZyBFVkRJIGFuZCBzdGFydGluZyBEaXNwbGF5TGlua01hbmFnZXIiCiAgaWYgISAv
+c2Jpbi9tb2Rwcm9iZSBldmRpIGluaXRpYWxfZGV2aWNlX2NvdW50PTA7IHRoZW4KICAgIGxvZyAi
+RVJST1I6IEVWREkgY291bGQgbm90IGJlIGxvYWRlZC4gUmV0cnlpbmcgd2l0aG91dCBjaGFuZ2lu
+ZyB0aGUgZ3JhcGhpY2FsIHNlc3Npb24uIgogICAgd3JpdGVfc3RhdGUgImVycm9yIiAibW9kcHJv
+YmUgZXZkaSBmYWlsZWQiCiAgICBzbGVlcCAxMAogICAgY29udGludWUKICBmaQoKICBMRF9MSUJS
+QVJZX1BBVEg9IiRJTlNUQUxMX1JPT1QiICIkTUFOQUdFUiIgJgogIE1BTkFHRVJfUElEPSQhCiAg
+U1RBUlRfRVBPQ0g9JChkYXRlICslcykKICB3cml0ZV9zdGF0ZSAicnVubmluZyIgIkRpc3BsYXlM
+aW5rTWFuYWdlciBpcyBhY3RpdmUgZm9yIGF1dGhlbnRpY2F0ZWQgc2Vzc2lvbiAke0FDVElWRV9T
+RVNTSU9OX0lEfSIKICBsb2cgIkRpc3BsYXlMaW5rTWFuYWdlciBzdGFydGVkIGFzIFBJRCAke01B
+TkFHRVJfUElEfS4iCgogIHVuZXhwZWN0ZWRfZXhpdD0wCiAgd2hpbGUgKCggU1RPUF9SRVFVRVNU
+RUQgPT0gMCApKTsgZG8KICAgIGlmICEga2lsbCAtMCAiJE1BTkFHRVJfUElEIiAyPi9kZXYvbnVs
+bDsgdGhlbgogICAgICB1bmV4cGVjdGVkX2V4aXQ9MQogICAgICBicmVhawogICAgZmkKICAgIGlm
+ICEgc2FtZV9zZXNzaW9uX2lzX2FjdGl2ZTsgdGhlbgogICAgICBlbGFwc2VkPSQoKCAkKGRhdGUg
+KyVzKSAtIFNUQVJUX0VQT0NIICkpCiAgICAgIGlmICgoIGVsYXBzZWQgPCBFQVJMWV9GQUlMVVJF
+X1NFQ09ORFMgKSk7IHRoZW4KICAgICAgICBwcmludGYgJ3Nlc3Npb24gJXMgZGlzYXBwZWFyZWQg
+JXMgc2Vjb25kcyBhZnRlciBkcml2ZXIgc3RhcnRcbicgIiRBQ1RJVkVfU0VTU0lPTl9JRCIgIiRl
+bGFwc2VkIiA+ICIkQkxPQ0tfRklMRSIKICAgICAgICBjaG1vZCAwNjQ0ICIkQkxPQ0tfRklMRSIK
+ICAgICAgICBsb2cgIlRoZSBkZXNrdG9wIHNlc3Npb24gZGlzYXBwZWFyZWQgJHtlbGFwc2VkfSBz
+ZWNvbmRzIGFmdGVyIGRyaXZlciBzdGFydDsgYmxvY2tpbmcgZnVydGhlciBzdGFydHMgZm9yIHRo
+aXMgYm9vdCB0byBwcmV2ZW50IGEgbG9naW4gbG9vcC4iCiAgICAgIGVsc2UKICAgICAgICBsb2cg
+IkdyYXBoaWNhbCBzZXNzaW9uICR7QUNUSVZFX1NFU1NJT05fSUR9IGVuZGVkOyBzdG9wcGluZyBE
+aXNwbGF5TGluayBiZWZvcmUgdGhlIGdyZWV0ZXIgaXMgdXNlZC4iCiAgICAgIGZpCiAgICAgIGJy
+ZWFrCiAgICBmaQogICAgaWYgISBtb25pdG9yX2Nvbm5lY3RlZDsgdGhlbgogICAgICBsb2cgIkFP
+QyBtb25pdG9yIGRpc2Nvbm5lY3RlZDsgc3RvcHBpbmcgRGlzcGxheUxpbmsgdW50aWwgaXQgaXMg
+cmVjb25uZWN0ZWQgZHVyaW5nIGFuIGF1dGhlbnRpY2F0ZWQgZGVza3RvcCBzZXNzaW9uLiIKICAg
+ICAgYnJlYWsKICAgIGZpCiAgICBzbGVlcCAiJFBPTExfU0VDT05EUyIKICBkb25lCgogIHN0b3Bf
+ZHJpdmVyCiAgaWYgKCggU1RPUF9SRVFVRVNURUQgPT0gMSApKTsgdGhlbgogICAgYnJlYWsKICBm
+aQoKICBpZiAoKCB1bmV4cGVjdGVkX2V4aXQgPT0gMSApKTsgdGhlbgogICAgbG9nICJEaXNwbGF5
+TGlua01hbmFnZXIgZXhpdGVkIHVuZXhwZWN0ZWRseTsgd2FpdGluZyBiZWZvcmUgcmV0cnlpbmcu
+IgogICAgd3JpdGVfc3RhdGUgImVycm9yIiAiRGlzcGxheUxpbmtNYW5hZ2VyIGV4aXRlZCB1bmV4
+cGVjdGVkbHkiCiAgICBzbGVlcCAxMAogIGVsc2UKICAgIHdyaXRlX3N0YXRlICJ3YWl0aW5nIiAi
+ZHJpdmVyIHN0b3BwZWQ7IHdhaXRpbmcgZm9yIGEgc3RhYmxlIGF1dGhlbnRpY2F0ZWQgZGVza3Rv
+cCBzZXNzaW9uIgogICAgc2xlZXAgIiRQT0xMX1NFQ09ORFMiCiAgZmkKZG9uZQoKd3JpdGVfc3Rh
+dGUgInN0b3BwZWQiICJicm9rZXIgZXhpdGVkIgpleGl0IDAK
+AOC_BROKER_PAYLOAD
+
+[[ "$(stat -c '%s' "$TEMP_FILE")" == "$BROKER_SIZE" ]] \
+  || die "Embedded broker size verification failed."
+[[ "$(sha256sum "$TEMP_FILE" | awk '{print $1}')" == "$BROKER_SHA256" ]] \
+  || die "Embedded broker SHA-256 verification failed."
+bash -n "$TEMP_FILE" || die "Embedded broker syntax validation failed."
+
+backup_dir="/var/backups/aoc-i1659fwux-session-broker-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup_dir"
+if [[ -e "$BROKER_PATH" ]]; then
+  cp -a -- "$BROKER_PATH" "$backup_dir/aoc-session-broker.sh.before"
+fi
+if [[ -e "$SAFE_UNIT_PATH" ]]; then
+  cp -a -- "$SAFE_UNIT_PATH" "$backup_dir/aoc-i1659fwux-displaylink.service.before"
+fi
+
+log "Stopping only the AOC DisplayLink broker service. The desktop and login manager are not restarted."
+systemctl stop "$SAFE_UNIT" >/dev/null 2>&1 || true
+pkill -TERM -f '/opt/displaylink/DisplayLinkManager' >/dev/null 2>&1 || true
+sleep 1
+/sbin/modprobe -r evdi >/dev/null 2>&1 || true
+
+install -m 0755 "$TEMP_FILE" "$BROKER_PATH"
+
+# Remove only package-owned pre-login EVDI startup left by an older revision.
+rm -f -- "$MODULE_LOAD_PATH"
+state_file="${STATE_DIR}/evdi-config/evdi.conf.state"
+backup_file="${STATE_DIR}/evdi-config/evdi.conf.before"
+if [[ -f "$state_file" ]] && grep -qx 'present' "$state_file" \
+    && [[ -e "$backup_file" || -L "$backup_file" ]]; then
+  rm -f -- "$EVDI_MODPROBE_PATH"
+  cp -a -- "$backup_file" "$EVDI_MODPROBE_PATH"
+elif [[ -f "$state_file" ]] && grep -qx 'absent' "$state_file"; then
+  rm -f -- "$EVDI_MODPROBE_PATH"
+elif [[ -f "$EVDI_MODPROBE_PATH" ]] \
+    && grep -Fqx '# AOC I1659FWUX: create one EVDI DRM device before the compositor starts.' "$EVDI_MODPROBE_PATH" \
+    && grep -Fqx 'options evdi initial_device_count=1' "$EVDI_MODPROBE_PATH"; then
+  rm -f -- "$EVDI_MODPROBE_PATH"
+fi
+
+rm -f -- /etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop
+rm -f -- /usr/local/libexec/aoc-i1659fwux-session-request.sh
+rm -f -- /usr/local/bin/aoc-i1659fwux-session-request
+rm -rf -- /run/aoc-i1659fwux-displaylink
+
+cat > "$SAFE_UNIT_PATH" <<'UNIT'
+[Unit]
+Description=AOC I1659FWUX post-login DisplayLink broker
+After=display-manager.service systemd-user-sessions.service
+Wants=systemd-user-sessions.service
+ConditionPathExists=/opt/displaylink/aoc-session-broker.sh
+ConditionPathExists=/opt/displaylink/DisplayLinkManager
+
+[Service]
+Type=simple
+ExecStart=/opt/displaylink/aoc-session-broker.sh
+WorkingDirectory=/opt/displaylink
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=graphical.target
+UNIT
+chmod 0644 "$SAFE_UNIT_PATH"
+udevadm control --reload-rules >/dev/null 2>&1 || true
+depmod -a >/dev/null 2>&1 || true
+systemctl daemon-reload
+systemctl enable "$SAFE_UNIT" >/dev/null
+systemctl restart "$SAFE_UNIT"
+
+if [[ -f /var/lib/aoc-i1659fwux-rpi-displaylink/install-info ]]; then
+  sed -i \
+    -e 's/^package_version=.*/package_version=0.2.3-hotfix/' \
+    -e 's/^startup=.*/startup=post-login-loginctl-stable-session-broker/' \
+    /var/lib/aoc-i1659fwux-rpi-displaylink/install-info
+  grep -q '^stable_session_delay_seconds=' /var/lib/aoc-i1659fwux-rpi-displaylink/install-info \
+    || printf 'stable_session_delay_seconds=45\n' >> /var/lib/aoc-i1659fwux-rpi-displaylink/install-info
+fi
+
+log "Hotfix installed. The existing authenticated desktop will be observed directly through loginctl."
+log "The monitor should begin activating after the desktop remains continuously stable for 45 seconds."
+log "No login, autologin, password, PAM, LightDM, SSH, boot-target, Wayland, or desktop setting was changed."
+log "Backup: ${backup_dir}"

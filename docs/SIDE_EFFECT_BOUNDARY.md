@@ -1,44 +1,31 @@
 # Side-effect boundary
 
-## Driver-specific changes allowed
+## Added driver components
 
-1. Install required Debian build/runtime dependencies and matching Raspberry Pi
-   kernel headers when absent.
-2. Extract the official AArch64 DisplayLink runtime to `/opt/displaylink`.
-3. Build and register the bundled EVDI source through DKMS for the running
-   kernel and build the matching `libevdi` user-space library.
-4. Install the AOC-specific udev rule for USB ID `17e9:ff10`.
-5. Install a root systemd broker that remains idle until an authenticated
-   desktop sends a valid heartbeat request.
-6. Install one display-specific XDG autostart entry and requester. The requester
-   waits inside the authenticated desktop before signalling the broker.
-7. Load EVDI with `initial_device_count=0` and run DisplayLinkManager only while
-   that authenticated local graphical session remains active.
-8. Store package state and logs under the package-specific `/var/lib` and
-   `/var/log` paths.
+- Official AArch64 DisplayLink runtime under `/opt/displaylink`.
+- Official bundled EVDI source registered through DKMS for the running kernel.
+- Exact-device udev rule for AOC USB ID `17e9:ff10`.
+- `aoc-i1659fwux-displaylink.service` and the post-login session broker.
+- Package state and logs under the matching `/var/lib` and `/var/log` paths.
 
-## Explicitly not allowed
+## Startup boundary
 
-- Loading EVDI from `modules-load.d` or creating an EVDI device at LightDM.
-- Running DisplayLinkManager directly from `graphical.target`.
-- Editing LightDM, GDM, SDDM, autologin, passwords, PAM, users, sudo, SSH,
-  systemd-logind or display-manager configuration.
-- Switching Wayland/X11 or editing labwc, Wayfire, LXDE or Xorg settings.
-- Changing the default target, gettys, `tty7`, Raspberry Pi boot configuration,
-  HDMI settings, display placement, scaling, rotation or primary-display state.
-- Restarting the display manager, logging out the user or rebooting
-  automatically.
+The system service may run at `graphical.target`, but it is only a broker. It
+does not load EVDI or launch DisplayLinkManager at LightDM. Driver startup
+requires all of the following:
 
-## Protected paths
+1. `loginctl` reports a local, non-remote, active `user` session.
+2. The session type is `wayland` or `x11`.
+3. A compositor process owned by that session's UID is running.
+4. The AOC `17e9:ff10` device is connected.
+5. The same session remains continuously valid for 45 seconds.
 
-The installer snapshots and verifies the existing login, authentication, SSH,
-boot, X11 and desktop configuration paths listed in `install.sh`. A detected
-change is restored before installation can report success.
+EVDI is loaded as `modprobe evdi initial_device_count=0`, so no virtual display
+is pre-created before authentication.
 
-The only intentional desktop-session addition is:
+## Forbidden changes
 
-```text
-/etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop
-```
-
-It is directly related to the USB display and is removed by the uninstaller.
+The package does not change LightDM, GDM, SDDM, autologin, passwords, PAM,
+users, sudo, SSH, the default boot target, gettys, `/boot` configuration,
+Wayland/X11 selection, compositor settings, or per-user desktop settings. It
+does not restart a display manager, log out the user, or reboot automatically.

@@ -1,30 +1,29 @@
-# Validation record
+# Validation record for 0.2.3
 
-Package: `aoc-i1659fwux-rpi-displaylink-driver-0.2.2`  
-Validation date: 2026-07-28
+The user-provided 0.2.2 status report showed:
 
-## Passed checks
+- local session `1`, UID 1000, class `user`, type `wayland`, active and non-remote;
+- compositor `labwc` running;
+- the AOC device connected as `17e9:ff10`;
+- EVDI installed but not loaded;
+- DisplayLinkManager not running;
+- no files in `/run/aoc-i1659fwux-displaylink`;
+- broker log waiting for an XDG autostart request.
 
-- Bash syntax for installer, uninstaller, status, repair, broker, requester,
-  remote installer and standalone installer.
-- Embedded remote payload size and SHA-256 verification.
-- No placeholder GitHub URLs.
-- Static scan confirms no command edits LightDM, autologin, PAM, passwords,
-  users, SSH, boot targets, gettys, Wayland/X11 choice or Raspberry Pi boot
-  configuration.
-- No package-created `modules-load.d` EVDI preload.
-- No package-created `initial_device_count=1` configuration.
-- Simulated LightDM/greeter state: broker remains idle and does not call
-  `modprobe` or DisplayLinkManager.
-- Simulated authenticated desktop heartbeat: broker waits for stability, calls
-  `modprobe evdi initial_device_count=0`, and starts DisplayLinkManager.
-- Simulated logout: broker stops DisplayLinkManager and unloads EVDI.
-- Early session-loss safety path creates a per-boot block to prevent repeated
-  login loops.
-- Existing protected-path backup and rollback logic remains enabled.
+This proves the driver build and USB detection were present while the request
+helper was the failed condition. Version 0.2.3 removes that condition and makes
+the broker use the same verified `loginctl` session information directly.
 
-## Validation limits
+Static and simulated tests are recorded in the release validation report beside
+the downloadable ZIP. Physical Raspberry Pi and monitor testing remains
+required.
 
-No physical Raspberry Pi or AOC I1659FWUX was available in the build
-environment. DRM hotplug, compositor acceptance, performance, firmware and
-native mode output still require target-hardware testing.
+
+An additional shell parsing defect was caught before release: because the
+scripts intentionally use newline/tab as their global `IFS`, `read -r sid _`
+did not split the space-separated `loginctl list-sessions` output. It treated
+the complete line as the session ID. Version 0.2.3 now extracts the first field
+with `awk` and reads one session ID per line. The corrected broker was simulated
+against the user's exact three-session pattern and successfully transitioned
+from `waiting` to `running`, then stopped and unloaded EVDI when the graphical
+session ended.
