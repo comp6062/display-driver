@@ -4,824 +4,819 @@ IFS=$'\n\t'
 umask 022
 
 PACKAGE_NAME="aoc-i1659fwux-rpi-displaylink"
-PACKAGE_VERSION="0.2.3"
-DISPLAYLINK_RELEASE="6.3"
-DISPLAYLINK_ZIP_SHA256="7269856c7527060c513215ce1b5a36fef074d8e89cab89bcab13df342acce098"
-DISPLAYLINK_ZIP_URL="https://www.synaptics.com/sites/default/files/exe_files/2026-06/DisplayLink%20USB%20Graphics%20Software%20for%20Ubuntu6.3-EXE.zip"
-DISPLAYLINK_EULA_URL="https://www.synaptics.com/products/displaylink-usb-graphics-software-ubuntu-63?filetype=exe"
-AOC_USB_VENDOR="17e9"
-AOC_USB_PRODUCT="ff10"
-AOC_USB_ID="${AOC_USB_VENDOR}:${AOC_USB_PRODUCT}"
-STATE_DIR="/var/lib/${PACKAGE_NAME}"
-LOG_DIR="/var/log/${PACKAGE_NAME}"
-INSTALL_ROOT="/opt/displaylink"
-SAFE_UNIT="aoc-i1659fwux-displaylink.service"
-SAFE_UNIT_PATH="/etc/systemd/system/${SAFE_UNIT}"
-UDEV_RULE_PATH="/etc/udev/rules.d/99-aoc-i1659fwux-displaylink.rules"
-MODULE_LOAD_PATH="/etc/modules-load.d/aoc-i1659fwux-evdi.conf"
-EVDI_MODPROBE_PATH="/etc/modprobe.d/evdi.conf"
+PACKAGE_VERSION="0.4.0"
+DRIVER_VERSION="6.3"
+EULA_PAGE="https://www.synaptics.com/products/displaylink-usb-graphics-software-ubuntu-63?filetype=exe"
+ARCHIVE_URL="https://www.synaptics.com/sites/default/files/exe_files/2026-06/DisplayLink%20USB%20Graphics%20Software%20for%20Ubuntu6.3-EXE.zip"
+ARCHIVE_SHA256="7269856c7527060c513215ce1b5a36fef074d8e89cab89bcab13df342acce098"
+AOC_VENDOR="17e9"
+AOC_PRODUCT="ff10"
+STATE_DIR="/var/lib/displaylink-rpi-safe"
+STATE_FILE="${STATE_DIR}/state"
+BACKUP_DIR="${STATE_DIR}/backup"
+LOG_FILE="${STATE_DIR}/install.log"
+CONTROL_HELPER="/usr/local/sbin/aoc-i1659fwux-usb-control"
+UDEV_POLICY_HELPER="/usr/local/sbin/aoc-i1659fwux-udev-policy"
+BROKER_HELPER="/usr/local/sbin/aoc-i1659fwux-session-broker"
+UDEV_RULE="/etc/udev/rules.d/00-aoc-i1659fwux-quarantine.rules"
+VENDOR_RULE_OVERRIDE="/etc/udev/rules.d/99-displaylink.rules"
+BROKER_UNIT="aoc-i1659fwux-session-broker.service"
+BROKER_UNIT_PATH="/etc/systemd/system/${BROKER_UNIT}"
+INITRAMFS_HOOK="/etc/initramfs-tools/hooks/aoc-i1659fwux-quarantine"
+EVDI_BOOT_BACKUP_DIR="${STATE_DIR}/evdi-boot-config"
+EVDI_BOOT_MANIFEST="${EVDI_BOOT_BACKUP_DIR}/manifest"
 BUNDLE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-LOCAL_VENDOR_ZIP="${BUNDLE_DIR}/vendor/DisplayLink-USB-Graphics-Software-for-Ubuntu-6.3.zip"
-
+STATUS_TOOL="/usr/local/sbin/aoc-i1659fwux-status"
+REPAIR_TOOL="/usr/local/sbin/aoc-i1659fwux-repair"
+UNINSTALL_TOOL="/usr/local/sbin/aoc-i1659fwux-uninstall"
+TEMP_BLOCK_ROOT="/etc/systemd/system"
 CHECK_ONLY=0
-REINSTALL=0
-FORCE_KERNEL=0
-NO_START=0
-WORK_DIR=""
-LOG_FILE=""
-EVDI_VERSION=""
-EVDI_LIBRARY_DIR=""
+ADOPT_EXISTING=1
+OFFICIAL_DRIVER_PREEXISTED=0
+OFFICIAL_INTERNAL_INSTALLER=""
+VENDOR_WAS_ENABLED=0
+VENDOR_WAS_ACTIVE=0
+MIGRATED_PACKAGE_STATE=0
 
-PROTECTED_PATHS=(
-  "/etc/lightdm"
-  "/etc/gdm3"
-  "/etc/sddm.conf"
-  "/etc/sddm.conf.d"
-  "/etc/pam.d"
-  "/etc/ssh"
-  "/etc/systemd/logind.conf"
-  "/etc/systemd/system/default.target"
-  "/etc/systemd/system/display-manager.service"
-  "/etc/systemd/system/getty@tty1.service.d"
-  "/etc/systemd/system/getty@tty7.service.d"
-  "/boot/config.txt"
-  "/boot/firmware/config.txt"
-  "/etc/X11"
-  "/usr/share/X11/xorg.conf.d"
-  "/etc/xdg/labwc"
-  "/etc/xdg/wayfire.ini"
-  "/etc/xdg/lxsession"
-)
+log() {
+    printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"
+}
+
+fail() {
+    log "ERROR: $*" >&2
+    return 1
+}
+
+prompt_exact() {
+    local prompt="$1" expected="$2" response=""
+    if [[ ! -r /dev/tty ]]; then
+        fail "An interactive terminal is required for confirmation prompts."
+    fi
+    printf '%s' "$prompt" >/dev/tty
+    IFS= read -r response </dev/tty || true
+    [[ "$response" == "$expected" ]]
+}
+
+as_root() {
+    if [[ ${EUID} -eq 0 ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+as_target() {
+    if [[ ${EUID} -eq 0 ]]; then
+        runuser -u "$TARGET_USER" -- "$@"
+    else
+        sudo -u "$TARGET_USER" "$@"
+    fi
+}
+
+resolve_target_user() {
+    if [[ ${EUID} -eq 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        printf '%s\n' "$SUDO_USER"
+        return
+    fi
+    if [[ ${EUID} -ne 0 ]]; then
+        id -un
+        return
+    fi
+    local candidate
+    candidate="$(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $3}' | grep -v '^root$' | head -n1 || true)"
+    if [[ -n "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return
+    fi
+    candidate="$(getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)$/ {print $1; exit}')"
+    [[ -n "$candidate" ]] || fail "Could not determine the normal desktop user. Run with sudo from that user's account."
+    printf '%s\n' "$candidate"
+}
+
+TARGET_USER="$(resolve_target_user)"
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+[[ -n "$TARGET_HOME" ]] || fail "Could not determine the home directory for ${TARGET_USER}."
+BASE_DIR="${TARGET_HOME}/Downloads/DisplayLink-Ubuntu-${DRIVER_VERSION}-official"
 
 usage() {
-  cat <<'USAGE'
-Usage: sudo ./install.sh [options]
+    cat <<'USAGE'
+Usage: ./install.sh [--check-only] [--no-adopt]
 
-Options:
-  --check-only                 Run platform checks without changing the system.
-  --reinstall                  Remove this package's existing installation first.
-  --force-unsupported-kernel   Continue outside the conservative 4.15-6.15 range.
-  --no-start                   Install but do not start the driver in this boot.
-  -h, --help                   Show this help.
+  --check-only  Run all non-changing platform and safety checks, then exit.
+  --no-adopt    Do not reuse an existing official DisplayLink 6.3 installation.
 USAGE
 }
 
-log() {
-  printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"
-}
+while (($#)); do
+    case "$1" in
+        --check-only) CHECK_ONLY=1 ;;
+        --no-adopt) ADOPT_EXISTING=0 ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "Unknown option: $1" ;;
+    esac
+    shift
+done
 
-warn() {
-  log "WARNING: $*" >&2
-}
+[[ -r /etc/os-release ]] || fail "Cannot read /etc/os-release."
+# shellcheck disable=SC1091
+source /etc/os-release
 
-die() {
-  log "ERROR: $*" >&2
-  return 1
-}
+ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+KERNEL="$(uname -r)"
+if [[ -r /proc/device-tree/model ]]; then
+    MODEL="$(tr -d '\0' </proc/device-tree/model)"
+else
+    MODEL="unknown"
+fi
 
-version_lt() {
-  [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" != "$2" ]]
-}
-
-version_gt() {
-  [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" != "$2" ]]
-}
-
-cleanup_workdir() {
-  if [[ -n "${WORK_DIR}" && -d "${WORK_DIR}" ]]; then
-    rm -rf -- "${WORK_DIR}"
-  fi
-}
-
-read_pi_model() {
-  if [[ -r /proc/device-tree/model ]]; then
-    tr -d '\0' < /proc/device-tree/model
-  else
-    printf 'unknown'
-  fi
-}
-
-manifest_protected() {
-  local root item
-  for root in "${PROTECTED_PATHS[@]}"; do
-    if [[ ! -e "$root" && ! -L "$root" ]]; then
-      printf 'ABSENT|%s\n' "$root"
-      continue
+platform_check() {
+    case "$ARCH" in
+        arm64|aarch64) ;;
+        *) fail "This package is only for Raspberry Pi ARM64/aarch64; detected ${ARCH}." ;;
+    esac
+    case "$MODEL" in
+        *"Raspberry Pi 4"*|*"Raspberry Pi 5"*) ;;
+        *) fail "Supported hardware is Raspberry Pi 4B or Raspberry Pi 5; detected '${MODEL}'." ;;
+    esac
+    command -v systemctl >/dev/null 2>&1 || fail "systemd is required."
+    command -v loginctl >/dev/null 2>&1 || fail "systemd-logind is required."
+    command -v udevadm >/dev/null 2>&1 || fail "udev is required."
+    command -v modprobe >/dev/null 2>&1 || fail "modprobe is required."
+    if [[ ! -e "/lib/modules/${KERNEL}/build" ]]; then
+        log "Matching kernel headers are not installed yet; the installer will install them."
     fi
-
-    if [[ -L "$root" ]]; then
-      printf 'LINK|%s|%s\n' "$root" "$(readlink -- "$root")"
-    elif [[ -f "$root" ]]; then
-      printf 'FILE|%s|%s|%s\n' "$root" \
-        "$(stat -c '%a:%u:%g:%s:%Y' -- "$root")" \
-        "$(sha256sum -- "$root" | awk '{print $1}')"
-    elif [[ -d "$root" ]]; then
-      printf 'DIRROOT|%s|%s\n' "$root" "$(stat -c '%a:%u:%g:%Y' -- "$root")"
-      while IFS= read -r -d '' item; do
-        if [[ -L "$item" ]]; then
-          printf 'LINK|%s|%s\n' "$item" "$(readlink -- "$item")"
-        elif [[ -f "$item" ]]; then
-          printf 'FILE|%s|%s|%s\n' "$item" \
-            "$(stat -c '%a:%u:%g:%s:%Y' -- "$item")" \
-            "$(sha256sum -- "$item" | awk '{print $1}')"
-        elif [[ -d "$item" ]]; then
-          printf 'DIR|%s|%s\n' "$item" "$(stat -c '%a:%u:%g:%Y' -- "$item")"
-        else
-          printf 'OTHER|%s|%s\n' "$item" "$(stat -c '%F:%a:%u:%g:%s:%Y' -- "$item")"
-        fi
-      done < <(find -P "$root" -mindepth 1 -xdev -print0 | sort -z)
-    fi
-  done
+    log "Platform check passed: ${MODEL}; ${PRETTY_NAME:-unknown}; ${ARCH}; kernel ${KERNEL}."
 }
+
+power_warning() {
+    cat >/dev/tty <<POWER
+
+IMPORTANT POWER REQUIREMENT
+---------------------------
+The AOC I1659FWUX is USB-powered and is rated at about 8 W. A software driver
+cannot prevent that physical 5 V power draw before Linux starts.
+
+For this boot-safe package, connect the monitor through a separately powered,
+USB 3 data hub on BOTH Raspberry Pi 4B and Raspberry Pi 5. Do not rely on the
+Pi USB port alone for a monitor that already causes the Pi to stall at boot.
+
+This package prevents early DisplayLink/udev/DRM activation. It cannot repair
+a pre-Linux electrical brownout, inrush-current problem, or USB over-current
+stall. A powered hub is therefore part of the required working setup.
+
+POWER
+    prompt_exact 'Type exactly POWER READY to confirm the power requirement: ' 'POWER READY' || {
+        log "Cancelled before making changes."
+        exit 0
+    }
+}
+
+protected_paths=(
+    /etc/lightdm/lightdm.conf
+    /etc/lightdm/lightdm.conf.d
+    "/var/lib/AccountsService/users/${TARGET_USER}"
+    /etc/pam.d
+    /etc/ssh
+    /etc/systemd/system/getty@tty1.service.d
+    /etc/systemd/system/getty@tty7.service.d
+    /etc/systemd/system/default.target
+    /etc/systemd/system/display-manager.service
+)
 
 snapshot_protected() {
-  local snapshot_tmp="${STATE_DIR}/protected.tmp"
-  local snapshot_final="${STATE_DIR}/protected"
-  rm -rf -- "$snapshot_tmp" "$snapshot_final"
-  install -d -m 0700 "$snapshot_tmp"
-  : > "${snapshot_tmp}/present.list"
-  : > "${snapshot_tmp}/absent.list"
-
-  local path
-  for path in "${PROTECTED_PATHS[@]}"; do
-    if [[ -e "$path" || -L "$path" ]]; then
-      printf '%s\n' "${path#/}" >> "${snapshot_tmp}/present.list"
-    else
-      printf '%s\n' "$path" >> "${snapshot_tmp}/absent.list"
+    local output="$1"
+    as_root bash -s -- "$output" "$TARGET_USER" <<'SNAP'
+set -Eeuo pipefail
+output="$1"
+target_user="$2"
+paths=(
+    /etc/lightdm/lightdm.conf
+    /etc/lightdm/lightdm.conf.d
+    "/var/lib/AccountsService/users/${target_user}"
+    /etc/pam.d
+    /etc/ssh/sshd_config
+    /etc/ssh/sshd_config.d
+    /etc/systemd/system/getty@tty1.service.d
+    /etc/systemd/system/getty@tty7.service.d
+    /etc/systemd/system/default.target
+    /etc/systemd/system/display-manager.service
+)
+: >"$output"
+for path in "${paths[@]}"; do
+    if [[ ! -e "$path" && ! -L "$path" ]]; then
+        printf 'ABSENT|%s\n' "$path" >>"$output"
+    elif [[ -L "$path" ]]; then
+        printf 'LINK|%s|%s\n' "$path" "$(readlink "$path")" >>"$output"
+    elif [[ -f "$path" ]]; then
+        printf 'FILE|%s|%s\n' "$path" "$(sha256sum "$path" | awk '{print $1}')" >>"$output"
+    elif [[ -d "$path" ]]; then
+        while IFS= read -r -d '' item; do
+            if [[ -L "$item" ]]; then
+                printf 'LINK|%s|%s\n' "$item" "$(readlink "$item")"
+            elif [[ -f "$item" ]]; then
+                printf 'FILE|%s|%s\n' "$item" "$(sha256sum "$item" | awk '{print $1}')"
+            fi
+        done < <(find -P "$path" -xdev -print0 | sort -z) >>"$output"
     fi
-  done
+done
+chmod 0644 "$output"
+SNAP
+}
 
-  if [[ -s "${snapshot_tmp}/present.list" ]]; then
-    tar -C / -cpf "${snapshot_tmp}/protected-before.tar" \
-      -T "${snapshot_tmp}/present.list"
-  else
-    : > "${snapshot_tmp}/protected-before.tar"
-  fi
-
-  manifest_protected > "${snapshot_tmp}/manifest-before.txt"
-  chmod 0600 "${snapshot_tmp}/protected-before.tar" \
-    "${snapshot_tmp}/manifest-before.txt" \
-    "${snapshot_tmp}/present.list" \
-    "${snapshot_tmp}/absent.list"
-  touch "${snapshot_tmp}/READY"
-  chmod 0600 "${snapshot_tmp}/READY"
-  mv -- "$snapshot_tmp" "$snapshot_final"
+backup_protected() {
+    as_root rm -rf "$BACKUP_DIR"
+    as_root install -d -m 0700 "$BACKUP_DIR"
+    local list_file="${BACKUP_DIR}/paths.txt" path
+    : | as_root tee "$list_file" >/dev/null
+    for path in "${protected_paths[@]}"; do
+        if as_root test -e "$path" || as_root test -L "$path"; then
+            printf '%s\n' "${path#/}" | as_root tee -a "$list_file" >/dev/null
+        fi
+    done
+    if as_root test -s "$list_file"; then
+        as_root tar --numeric-owner --acls --xattrs -C / -cpf "${BACKUP_DIR}/protected.tar" -T "$list_file"
+    fi
 }
 
 restore_protected() {
-  [[ -f "${STATE_DIR}/protected/READY" ]] || return 0
-
-  local path
-  if [[ -f "${STATE_DIR}/protected/present.list" ]]; then
-    while IFS= read -r path; do
-      [[ -n "$path" ]] || continue
-      rm -rf -- "/$path"
-    done < "${STATE_DIR}/protected/present.list"
-  fi
-
-  if [[ -f "${STATE_DIR}/protected/absent.list" ]]; then
-    while IFS= read -r path; do
-      [[ -n "$path" ]] || continue
-      rm -rf -- "$path"
-    done < "${STATE_DIR}/protected/absent.list"
-  fi
-
-  if [[ -s "${STATE_DIR}/protected/protected-before.tar" ]]; then
-    tar -C / -xpf "${STATE_DIR}/protected/protected-before.tar"
-  fi
+    local path
+    for path in "${protected_paths[@]}"; do
+        as_root rm -rf -- "$path"
+    done
+    if as_root test -f "${BACKUP_DIR}/protected.tar"; then
+        as_root tar --numeric-owner --acls --xattrs -C / -xpf "${BACKUP_DIR}/protected.tar"
+    fi
 }
 
-verify_and_restore_protected() {
-  [[ -f "${STATE_DIR}/protected/READY" ]] \
-    || die "Protected-path snapshot is incomplete; refusing to report success."
-  manifest_protected > "${STATE_DIR}/protected/manifest-after.txt"
-  chmod 0600 "${STATE_DIR}/protected/manifest-after.txt"
-  if ! cmp -s "${STATE_DIR}/protected/manifest-before.txt" \
-      "${STATE_DIR}/protected/manifest-after.txt"; then
-    warn "A protected login, authentication, boot, X11, or desktop-session path changed during installation."
-    warn "Restoring the protected paths exactly to their pre-install state."
-    diff -u "${STATE_DIR}/protected/manifest-before.txt" \
-      "${STATE_DIR}/protected/manifest-after.txt" \
-      > "${STATE_DIR}/protected/differences-restored.diff" || true
-    chmod 0600 "${STATE_DIR}/protected/differences-restored.diff"
-    restore_protected
-    manifest_protected > "${STATE_DIR}/protected/manifest-restored.txt"
-    chmod 0600 "${STATE_DIR}/protected/manifest-restored.txt"
-    cmp -s "${STATE_DIR}/protected/manifest-before.txt" \
-      "${STATE_DIR}/protected/manifest-restored.txt" \
-      || die "Protected system settings could not be restored. Backup: ${STATE_DIR}/protected"
-  fi
+service_exists() {
+    systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "$1"
 }
 
-snapshot_evdi_config() {
-  mkdir -p "${STATE_DIR}/evdi-config"
-  if [[ -e "${EVDI_MODPROBE_PATH}" || -L "${EVDI_MODPROBE_PATH}" ]]; then
-    printf 'present\n' > "${STATE_DIR}/evdi-config/evdi.conf.state"
-    cp -a -- "${EVDI_MODPROBE_PATH}" "${STATE_DIR}/evdi-config/evdi.conf.before"
-  else
-    printf 'absent\n' > "${STATE_DIR}/evdi-config/evdi.conf.state"
-  fi
+find_vendor_service() {
+    local unit
+    for unit in displaylink-driver.service displaylink.service; do
+        if service_exists "$unit"; then
+            printf '%s\n' "$unit"
+            return 0
+        fi
+    done
+    return 1
 }
 
-restore_evdi_config() {
-  rm -f -- "${MODULE_LOAD_PATH}"
-  rm -f -- "${UDEV_RULE_PATH}"
+load_previous_package_state() {
+    as_root test -r "$STATE_FILE" || return 0
+    local previous_name
+    previous_name="$(as_root sed -n 's/^PACKAGE_NAME=//p' "$STATE_FILE" | tail -n1)"
+    [[ "$previous_name" == "$PACKAGE_NAME" ]] || return 0
 
-  local state_file="${STATE_DIR}/evdi-config/evdi.conf.state"
-  local backup="${STATE_DIR}/evdi-config/evdi.conf.before"
-  if [[ -f "$state_file" ]] && grep -qx 'present' "$state_file" \
-      && [[ -e "$backup" || -L "$backup" ]]; then
-    rm -f -- "${EVDI_MODPROBE_PATH}"
-    cp -a -- "$backup" "${EVDI_MODPROBE_PATH}"
-  elif [[ -f "$state_file" ]] && grep -qx 'absent' "$state_file"; then
-    rm -f -- "${EVDI_MODPROBE_PATH}"
-  fi
-
-  udevadm control --reload-rules >/dev/null 2>&1 || true
-  depmod -a >/dev/null 2>&1 || true
+    MIGRATED_PACKAGE_STATE=1
+    VENDOR_WAS_ENABLED="$(as_root sed -n 's/^VENDOR_SERVICE_WAS_ENABLED=//p' "$STATE_FILE" | tail -n1)"
+    VENDOR_WAS_ACTIVE="$(as_root sed -n 's/^VENDOR_SERVICE_WAS_ACTIVE=//p' "$STATE_FILE" | tail -n1)"
+    OFFICIAL_DRIVER_PREEXISTED="$(as_root sed -n 's/^OFFICIAL_DRIVER_PREEXISTED=//p' "$STATE_FILE" | tail -n1)"
+    OFFICIAL_INTERNAL_INSTALLER="$(as_root sed -n 's/^OFFICIAL_INTERNAL_INSTALLER=//p' "$STATE_FILE" | tail -n1)"
+    VENDOR_WAS_ENABLED="${VENDOR_WAS_ENABLED:-0}"
+    VENDOR_WAS_ACTIVE="${VENDOR_WAS_ACTIVE:-0}"
+    OFFICIAL_DRIVER_PREEXISTED="${OFFICIAL_DRIVER_PREEXISTED:-0}"
+    log "Migrating the rollback state from the previously installed package revision."
 }
 
-remove_partial_driver() {
-  systemctl disable --now "${SAFE_UNIT}" >/dev/null 2>&1 || true
-  rm -f -- "${SAFE_UNIT_PATH}"
-  systemctl daemon-reload >/dev/null 2>&1 || true
+disable_previous_wrappers() {
+    local unit path
+    for unit in         displaylink-after-login.service         aoc-i1659fwux-displaylink.service         aoc-i1659fwux-session-broker.service         aoc-i1659fwux-runtime.service; do
+        as_root systemctl disable --now "$unit" 2>/dev/null || true
+    done
+    for path in         /etc/modules-load.d/aoc-i1659fwux-evdi.conf         /etc/modprobe.d/aoc-i1659fwux-evdi.conf         /etc/modprobe.d/evdi.conf.d/aoc-i1659fwux.conf         /etc/systemd/system/aoc-i1659fwux-runtime.service         /etc/systemd/system/aoc-i1659fwux-displaylink.service         /etc/systemd/system/displaylink-after-login.service         /usr/local/sbin/displaylink-after-login-safe         /usr/local/sbin/aoc-i1659fwux-session-guard; do
+        as_root rm -f "$path"
+    done
+    restore_previous_aoc_evdi_policy
+    # Do not unload or rewrite the official EVDI boot configuration here. The
+    # supplied baseline works because that configuration is left intact while
+    # the physical AOC device and vendor service are blocked until login.
+    as_root systemctl daemon-reload
+}
 
-  modprobe -r evdi >/dev/null 2>&1 || true
+restore_previous_aoc_evdi_policy() {
+    # Revision 0.3.x forced initial_device_count=0 and replaced EVDI preload
+    # files. That made this monitor fail to appear on some Raspberry Pi desktop
+    # stacks. Restore the exact pre-0.3.x state when its backup is present.
+    if as_root test -f "$EVDI_BOOT_MANIFEST"; then
+        local state path rel
+        while IFS='|' read -r state path; do
+            [[ -n "$path" ]] || continue
+            as_root rm -rf -- "$path"
+            if [[ "$state" == "EXISTS" ]]; then
+                rel="${path#/}"
+                if as_root test -e "$EVDI_BOOT_BACKUP_DIR/root/$rel" || \
+                   as_root test -L "$EVDI_BOOT_BACKUP_DIR/root/$rel"; then
+                    as_root install -d -m 0755 "$(dirname "$path")"
+                    as_root cp -a "$EVDI_BOOT_BACKUP_DIR/root/$rel" "$path"
+                fi
+            fi
+        done < <(as_root cat "$EVDI_BOOT_MANIFEST")
+        as_root rm -rf "$EVDI_BOOT_BACKUP_DIR"
+        return 0
+    fi
 
-  if [[ -z "${EVDI_VERSION}" && -r "${STATE_DIR}/evdi-version" ]]; then
-    EVDI_VERSION="$(cat "${STATE_DIR}/evdi-version")"
-  fi
-  if [[ -n "${EVDI_VERSION}" ]]; then
-    if command -v dkms >/dev/null 2>&1; then
-      if dkms remove -m evdi -v "${EVDI_VERSION}" --all >/dev/null 2>&1; then
-        rm -rf -- "/usr/src/evdi-${EVDI_VERSION}"
-      else
-        warn "EVDI DKMS cleanup failed; preserving /usr/src/evdi-${EVDI_VERSION} for manual recovery."
-      fi
+    # Handle an interrupted 0.3.x install that created the managed override
+    # before its backup manifest was completed. Remove only files carrying our
+    # package marker; never remove an unrelated administrator file.
+    local path
+    for path in /etc/modules-load.d/evdi.conf /etc/modprobe.d/evdi.conf; do
+        if as_root test -f "$path" && \
+           as_root grep -Fq 'Managed by aoc-i1659fwux-rpi-displaylink' "$path"; then
+            as_root rm -f "$path"
+        fi
+    done
+}
+
+install_early_usb_gate() {
+    as_root install -d -m 0700 "$STATE_DIR"
+
+    as_root tee "$UDEV_POLICY_HELPER" >/dev/null <<'POLICY'
+#!/usr/bin/env bash
+set -u
+if [[ -e /run/aoc-i1659fwux-displaylink/allow ]]; then
+    printf 'AOC_DISPLAYLINK_ALLOW=1\n'
+else
+    printf 'AOC_DISPLAYLINK_ALLOW=0\n'
+fi
+POLICY
+    as_root chmod 0755 "$UDEV_POLICY_HELPER"
+
+    as_root tee "$CONTROL_HELPER" >/dev/null <<'CONTROL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+RUNTIME_DIR="/run/aoc-i1659fwux-displaylink"
+VENDOR="17e9"
+PRODUCT="ff10"
+
+find_devices() {
+    local dev vendor product
+    for dev in /sys/bus/usb/devices/*; do
+        [[ -r "$dev/idVendor" && -r "$dev/idProduct" ]] || continue
+        read -r vendor <"$dev/idVendor" || continue
+        read -r product <"$dev/idProduct" || continue
+        if [[ "$vendor" == "$VENDOR" && "$product" == "$PRODUCT" ]]; then
+            printf '%s\n' "$dev"
+        fi
+    done
+}
+
+set_authorized() {
+    local value="$1" dev
+    while IFS= read -r dev; do
+        [[ -n "$dev" ]] || continue
+        if [[ -w "$dev/authorized" ]]; then
+            printf '%s' "$value" >"$dev/authorized" || true
+        fi
+    done < <(find_devices)
+}
+
+case "${1:-}" in
+    deny|quarantine)
+        rm -f "${RUNTIME_DIR}/allow"
+        set_authorized 0
+        ;;
+    allow)
+        install -d -m 0755 "$RUNTIME_DIR"
+        : >"${RUNTIME_DIR}/allow"
+        set_authorized 1
+        udevadm settle --timeout=15 2>/dev/null || true
+        ;;
+    list)
+        find_devices
+        ;;
+    *)
+        echo "Usage: $0 {deny|allow|list}" >&2
+        exit 2
+        ;;
+esac
+CONTROL
+    as_root chmod 0755 "$CONTROL_HELPER"
+
+    as_root tee "$UDEV_RULE" >/dev/null <<'RULE'
+# AOC I1659FWUX boot quarantine. This exact USB device remains unauthorized
+# until the post-login broker creates /run/aoc-i1659fwux-displaylink/allow.
+ACTION=="add|change|bind", SUBSYSTEM=="usb", ATTR{idVendor}=="17e9", ATTR{idProduct}=="ff10", IMPORT{program}="/usr/local/sbin/aoc-i1659fwux-udev-policy"
+ACTION=="add|change|bind", SUBSYSTEM=="usb", ATTR{idVendor}=="17e9", ATTR{idProduct}=="ff10", ENV{AOC_DISPLAYLINK_ALLOW}!="1", ATTR{authorized}="0"
+RULE
+    as_root chmod 0644 "$UDEV_RULE"
+    as_root udevadm control --reload-rules
+    as_root "$CONTROL_HELPER" deny || true
+}
+
+install_initramfs_hook_if_applicable() {
+    if [[ ! -d /etc/initramfs-tools || ! -x "$(command -v update-initramfs 2>/dev/null || true)" ]]; then
+        return 0
+    fi
+    as_root tee "$INITRAMFS_HOOK" >/dev/null <<'HOOK'
+#!/bin/sh
+set -e
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0;; esac
+. /usr/share/initramfs-tools/hook-functions
+mkdir -p "${DESTDIR}/etc/udev/rules.d" "${DESTDIR}/usr/local/sbin"
+cp -a /etc/udev/rules.d/00-aoc-i1659fwux-quarantine.rules "${DESTDIR}/etc/udev/rules.d/"
+copy_exec /usr/local/sbin/aoc-i1659fwux-udev-policy /usr/local/sbin
+HOOK
+    as_root chmod 0755 "$INITRAMFS_HOOK"
+    if ls /boot/initrd.img-* /boot/firmware/initrd.img-* >/dev/null 2>&1; then
+        log "Updating the already-configured initramfs with the exact-device USB quarantine rule."
+        as_root update-initramfs -u -k "$KERNEL" || log "WARNING: initramfs update failed; root-filesystem udev quarantine remains installed."
+    fi
+}
+
+backup_and_disable_vendor_udev_rule() {
+    as_root install -d -m 0700 "${STATE_DIR}/vendor-udev"
+    local saved="${STATE_DIR}/vendor-udev/99-displaylink.rules.original"
+
+    # Keep the real original retained by an earlier revision. Do not replace it
+    # with that revision's /dev/null override during an in-place upgrade.
+    if as_root test -e "$saved" || as_root test -L "$saved"; then
+        printf 'VENDOR_RULE_IN_ETC=1\n' | as_root tee -a "$STATE_FILE" >/dev/null
+    elif as_root test -e "$VENDOR_RULE_OVERRIDE" || as_root test -L "$VENDOR_RULE_OVERRIDE"; then
+        if [[ "$(as_root readlink "$VENDOR_RULE_OVERRIDE" 2>/dev/null || true)" != "/dev/null" ]]; then
+            as_root cp -a "$VENDOR_RULE_OVERRIDE" "$saved"
+            printf 'VENDOR_RULE_IN_ETC=1\n' | as_root tee -a "$STATE_FILE" >/dev/null
+        else
+            printf 'VENDOR_RULE_IN_ETC=0\n' | as_root tee -a "$STATE_FILE" >/dev/null
+        fi
     else
-      warn "DKMS is unavailable; preserving /usr/src/evdi-${EVDI_VERSION} for manual recovery."
+        printf 'VENDOR_RULE_IN_ETC=0\n' | as_root tee -a "$STATE_FILE" >/dev/null
     fi
-  fi
-
-  rm -rf -- "${INSTALL_ROOT}"
-  rm -f -- /etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop
-  rm -f -- /usr/local/libexec/aoc-i1659fwux-session-request.sh
-  rm -f -- /usr/local/bin/aoc-i1659fwux-session-request
-  rm -rf -- /run/aoc-i1659fwux-displaylink
-  restore_evdi_config
-  systemctl daemon-reload >/dev/null 2>&1 || true
+    as_root rm -f "$VENDOR_RULE_OVERRIDE"
+    as_root ln -s /dev/null "$VENDOR_RULE_OVERRIDE"
+    as_root udevadm control --reload-rules
 }
 
-rollback_on_error() {
-  local exit_code=$?
-  trap - ERR INT TERM
-  set +e
-  warn "Installation failed; restoring the pre-install driver and protected-file state."
-  remove_partial_driver
-  restore_protected
-  cleanup_workdir
-
-  if [[ -d "${STATE_DIR}" ]]; then
-    local failed_backup="/var/backups/${PACKAGE_NAME}-failed-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$(dirname -- "$failed_backup")"
-    mv -- "${STATE_DIR}" "$failed_backup" 2>/dev/null || true
-    warn "Failure-state diagnostics were preserved at ${failed_backup}."
-  fi
-  warn "Rollback finished. Review ${LOG_FILE:-the terminal output}."
-  exit "$exit_code"
+install_support_tools() {
+    [[ -f "${BUNDLE_DIR}/status.sh" ]] || fail "Bundle is missing status.sh."
+    [[ -f "${BUNDLE_DIR}/repair-login.sh" ]] || fail "Bundle is missing repair-login.sh."
+    [[ -f "${BUNDLE_DIR}/uninstall.sh" ]] || fail "Bundle is missing uninstall.sh."
+    as_root install -m 0755 "${BUNDLE_DIR}/status.sh" "$STATUS_TOOL"
+    as_root install -m 0755 "${BUNDLE_DIR}/repair-login.sh" "$REPAIR_TOOL"
+    as_root install -m 0755 "${BUNDLE_DIR}/uninstall.sh" "$UNINSTALL_TOOL"
 }
 
-parse_args() {
-  while (($#)); do
-    case "$1" in
-      --check-only) CHECK_ONLY=1 ;;
-      --reinstall) REINSTALL=1 ;;
-      --force-unsupported-kernel) FORCE_KERNEL=1 ;;
-      --no-start) NO_START=1 ;;
-      -h|--help) usage; exit 0 ;;
-      *) die "Unknown option: $1" ;;
-    esac
-    shift
-  done
+configure_vendor_service_post_login() {
+    local vendor_service="$1"
+    local dropin_dir="/etc/systemd/system/${vendor_service}.d"
+    local dropin_path="${dropin_dir}/90-aoc-i1659fwux-post-login.conf"
+
+    as_root install -d -m 0755 "$dropin_dir"
+    as_root tee "$dropin_path" >/dev/null <<'DROPIN'
+[Unit]
+# Remove the vendor tty/getty conflict and refuse every pre-login start.
+Conflicts=
+ConditionPathExists=/run/aoc-i1659fwux-displaylink/allow
+After=systemd-udevd.service
+DROPIN
+    as_root chmod 0644 "$dropin_path"
+    as_root systemctl unmask "$vendor_service" 2>/dev/null || true
+    as_root systemctl daemon-reload
+    as_root systemctl disable --now "$vendor_service" 2>/dev/null || true
 }
 
-require_root() {
-  [[ ${EUID} -eq 0 ]] || die "Run this installer with sudo."
+install_broker() {
+    as_root tee "$BROKER_HELPER" >/dev/null <<'BROKER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+STATE_FILE="/var/lib/displaylink-rpi-safe/state"
+CONTROL="/usr/local/sbin/aoc-i1659fwux-usb-control"
+LOG="/var/lib/displaylink-rpi-safe/broker.log"
+
+install -d -m 0700 /var/lib/displaylink-rpi-safe
+exec >>"$LOG" 2>&1
+
+TARGET_USER="$(sed -n 's/^TARGET_USER=//p' "$STATE_FILE" | tail -n1)"
+VENDOR_SERVICE="$(sed -n 's/^VENDOR_SERVICE=//p' "$STATE_FILE" | tail -n1)"
+[[ -n "$TARGET_USER" && -n "$VENDOR_SERVICE" ]] || exit 1
+
+log() { printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"; }
+
+session_is_graphical() {
+    local sid="$1" name active type class remote state
+    name="$(loginctl show-session "$sid" -p Name --value 2>/dev/null || true)"
+    active="$(loginctl show-session "$sid" -p Active --value 2>/dev/null || true)"
+    type="$(loginctl show-session "$sid" -p Type --value 2>/dev/null || true)"
+    class="$(loginctl show-session "$sid" -p Class --value 2>/dev/null || true)"
+    remote="$(loginctl show-session "$sid" -p Remote --value 2>/dev/null || true)"
+    state="$(loginctl show-session "$sid" -p State --value 2>/dev/null || true)"
+    [[ "$name" == "$TARGET_USER" && "$active" == "yes" && "$remote" != "yes" && \
+       "$class" != "greeter" && ( "$type" == "x11" || "$type" == "wayland" ) && \
+       ( "$state" == "active" || "$state" == "online" ) ]]
 }
 
-check_platform() {
-  local arch model os_id os_like version_id codename kernel_base
-
-  arch="$(uname -m)"
-  [[ "$arch" == "aarch64" ]] \
-    || die "This package requires a 64-bit ARM userland/kernel (aarch64). Detected: ${arch}"
-
-  [[ -r /proc/device-tree/model ]] || die "Unable to identify the Raspberry Pi model."
-  model="$(read_pi_model)"
-  [[ "$model" =~ Raspberry[[:space:]]Pi[[:space:]](4|5) ]] \
-    || die "Supported hardware is Raspberry Pi 4 or Raspberry Pi 5. Detected: ${model}"
-
-  [[ -r /etc/os-release ]] || die "Missing /etc/os-release."
-  # shellcheck disable=SC1091
-  source /etc/os-release
-  os_id="${ID:-unknown}"
-  os_like="${ID_LIKE:-}"
-  version_id="${VERSION_ID:-unknown}"
-  codename="${VERSION_CODENAME:-unknown}"
-
-  if [[ "$os_id" != "raspbian" && "$os_id" != "debian" && "$os_like" != *debian* ]]; then
-    die "This package is limited to Raspberry Pi OS/Raspbian and its Debian base. Detected ID=${os_id}."
-  fi
-
-  command -v systemctl >/dev/null 2>&1 || die "systemd is required."
-  systemctl get-default >/dev/null 2>&1 || die "systemd is not operational."
-
-  kernel_base="$(uname -r | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)"
-  [[ -n "$kernel_base" ]] || die "Unable to parse kernel version: $(uname -r)"
-  if (( FORCE_KERNEL == 0 )); then
-    version_lt "$kernel_base" "4.15.0" \
-      && die "Kernel ${kernel_base} is older than the supported minimum."
-    version_gt "$kernel_base" "6.15.99" \
-      && die "Kernel ${kernel_base} is outside the conservative range. Use --force-unsupported-kernel only for testing."
-  fi
-
-  log "Platform: ${model}; architecture ${arch}; OS ${os_id} ${version_id} (${codename}); kernel $(uname -r)."
-  if command -v lsusb >/dev/null 2>&1 && lsusb -d "${AOC_USB_ID}" >/dev/null 2>&1; then
-    log "Detected AOC I1659FWUX USB device ${AOC_USB_ID}."
-  else
-    warn "The monitor USB ID ${AOC_USB_ID} is not connected. Installation may continue."
-  fi
+find_session() {
+    local sid
+    while read -r sid _; do
+        [[ -n "$sid" ]] || continue
+        if session_is_graphical "$sid"; then
+            printf '%s\n' "$sid"
+            return 0
+        fi
+    done < <(loginctl list-sessions --no-legend 2>/dev/null)
+    return 1
 }
 
-collect_conflicts() {
-  local -n result_ref=$1
-  result_ref=()
-
-  [[ -d "${STATE_DIR}" ]] && result_ref+=("this package's state directory")
-  [[ -d "${INSTALL_ROOT}" ]] && result_ref+=("${INSTALL_ROOT}")
-  [[ -e "${SAFE_UNIT_PATH}" ]] && result_ref+=("${SAFE_UNIT_PATH}")
-  [[ -e "${UDEV_RULE_PATH}" ]] && result_ref+=("${UDEV_RULE_PATH}")
-  [[ -e "${MODULE_LOAD_PATH}" ]] && result_ref+=("${MODULE_LOAD_PATH}")
-  [[ -L /usr/bin/displaylink-installer || -e /usr/bin/displaylink-installer ]] \
-    && result_ref+=("/usr/bin/displaylink-installer")
-
-  local known_path
-  for known_path in \
-    /usr/lib/displaylink \
-    /usr/lib64/displaylink \
-    /etc/udev/rules.d/99-displaylink.rules \
-    /usr/lib/udev/rules.d/99-displaylink.rules \
-    /lib/udev/rules.d/99-displaylink.rules \
-    /etc/modules-load.d/evdi.conf; do
-    [[ -e "$known_path" || -L "$known_path" ]] \
-      && result_ref+=("existing DisplayLink/EVDI path: ${known_path}")
-  done
-
-  if command -v dkms >/dev/null 2>&1 && dkms status 2>/dev/null | grep -qE '^evdi/'; then
-    result_ref+=("existing EVDI DKMS registration")
-  fi
-  if command -v lsmod >/dev/null 2>&1 && lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
-    result_ref+=("loaded EVDI kernel module")
-  fi
-  if compgen -G '/usr/src/evdi-*' >/dev/null; then
-    result_ref+=("existing /usr/src/evdi-* source")
-  fi
-  if dpkg-query -W -f='${Status}\n' displaylink-driver 2>/dev/null | grep -q 'install ok installed'; then
-    result_ref+=("displaylink-driver Debian package")
-  fi
-  if dpkg-query -W -f='${Status}\n' evdi-dkms 2>/dev/null | grep -q 'install ok installed'; then
-    result_ref+=("evdi-dkms Debian package")
-  fi
-
-  local service_file
-  while IFS= read -r service_file; do
-    [[ "$service_file" == "${SAFE_UNIT_PATH}" ]] && continue
-    result_ref+=("DisplayLink service: ${service_file}")
-  done < <(
-    grep -rl --include='*.service' 'DisplayLinkManager' \
-      /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system \
-      2>/dev/null | sort -u
-  )
+stop_displaylink() {
+    systemctl stop "$VENDOR_SERVICE" 2>/dev/null || true
+    "$CONTROL" deny || true
 }
 
-check_existing_install() {
-  if [[ -d "${STATE_DIR}" && ${REINSTALL} -eq 1 ]]; then
-    log "Removing this package's existing installation before reinstall."
-    "${BUNDLE_DIR}/uninstall.sh" --keep-backup
-  fi
+trap stop_displaylink EXIT
+trap 'exit 0' TERM INT
+stop_displaylink
+log "Waiting for authenticated graphical session for ${TARGET_USER}."
 
-  local conflicts=()
-  collect_conflicts conflicts
-  if ((${#conflicts[@]})); then
-    printf 'Conflicting DisplayLink/EVDI state detected:\n' >&2
-    printf '  - %s\n' "${conflicts[@]}" >&2
-    die "Remove the conflicting installation before using this isolated package."
-  fi
-}
+LAST_FAILED_SESSION=""
+while true; do
+    SESSION="$(find_session || true)"
+    if [[ -z "$SESSION" ]]; then
+        sleep 2
+        continue
+    fi
+    if [[ "$SESSION" == "$LAST_FAILED_SESSION" ]]; then
+        sleep 3
+        continue
+    fi
 
-accept_eula() {
-  local answer tty_input="/dev/tty"
-  printf '\nThe proprietary DisplayLink user-space files are governed by the Synaptics EULA:\n%s\n\n' \
-    "${DISPLAYLINK_EULA_URL}"
-  [[ -r "$tty_input" ]] \
-    || die "An interactive terminal is required to review and accept the Synaptics EULA."
-  read -r -p "Type AGREE to confirm that you reviewed and accept the EULA: " answer < "$tty_input"
-  [[ "$answer" == "AGREE" ]] || die "EULA not accepted; no system changes were made."
-}
+    log "Session ${SESSION} is active. Waiting 12 seconds before reproducing the known-good USB hot-plug sequence."
+    sleep 12
+    if ! session_is_graphical "$SESSION"; then
+        continue
+    fi
 
-record_dependency_state() {
-  local output_file=$1
-  shift
-  : > "$output_file"
-  local package
-  for package in "$@"; do
-    if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
-      printf '%s\tpresent\n' "$package" >> "$output_file"
+    "$CONTROL" allow
+    sleep 2
+    if ! systemctl start "$VENDOR_SERVICE"; then
+        log "Official DisplayLink service failed to start; returning the monitor to quarantine for this session."
+        LAST_FAILED_SESSION="$SESSION"
+        stop_displaylink
+        continue
+    fi
+
+    log "Official DisplayLink service started after login."
+    while session_is_graphical "$SESSION" && systemctl is-active --quiet "$VENDOR_SERVICE"; do
+        sleep 2
+    done
+
+    if session_is_graphical "$SESSION"; then
+        log "DisplayLink ended while the desktop remained active; quarantining until a new session."
+        LAST_FAILED_SESSION="$SESSION"
     else
-      printf '%s\tabsent\n' "$package" >> "$output_file"
+        log "Desktop session ended; stopping DisplayLink before the greeter returns."
+        LAST_FAILED_SESSION=""
     fi
-  done
-}
+    stop_displaylink
+    sleep 2
+done
+BROKER
+    as_root chmod 0755 "$BROKER_HELPER"
 
-install_dependencies() {
-  local dependencies=(
-    ca-certificates curl unzip dkms build-essential binutils pkg-config
-    libdrm-dev libelf-dev libusb-1.0-0 libstdc++6 usbutils
-  )
-  record_dependency_state "${STATE_DIR}/dependencies-before.tsv" "${dependencies[@]}"
-
-  log "Installing only the build/runtime packages required for DisplayLink and EVDI."
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends "${dependencies[@]}"
-
-  local kernel header_package=""
-  kernel="$(uname -r)"
-  if [[ ! -e "/lib/modules/${kernel}/build/Makefile" ]]; then
-    log "Installing Raspberry Pi kernel headers for ${kernel}."
-    if apt-cache show "linux-headers-${kernel}" >/dev/null 2>&1; then
-      header_package="linux-headers-${kernel}"
-    elif apt-cache show linux-headers-rpi-v8 >/dev/null 2>&1; then
-      header_package="linux-headers-rpi-v8"
-    elif apt-cache show raspberrypi-kernel-headers >/dev/null 2>&1; then
-      header_package="raspberrypi-kernel-headers"
-    else
-      die "No compatible Raspberry Pi kernel-header package was found."
-    fi
-
-    record_dependency_state "${STATE_DIR}/header-before.tsv" "$header_package"
-    printf '%s\n' "$header_package" > "${STATE_DIR}/header-package"
-    apt-get install -y --no-install-recommends "$header_package"
-  fi
-
-  [[ -e "/lib/modules/${kernel}/build/Makefile" ]] \
-    || die "Headers do not match running kernel ${kernel}. Update normally, reboot into the matching kernel, and rerun."
-}
-
-download_and_extract() {
-  WORK_DIR="$(mktemp -d -t aoc-displaylink.XXXXXXXX)"
-  local zip_file="${WORK_DIR}/displaylink.zip"
-  local run_file
-
-  if [[ -f "${LOCAL_VENDOR_ZIP}" ]]; then
-    log "Using the local unmodified Synaptics 6.3 archive in vendor/."
-    cp -- "${LOCAL_VENDOR_ZIP}" "$zip_file"
-  else
-    log "Downloading the unmodified DisplayLink 6.3 Ubuntu archive from Synaptics."
-    curl --fail --location --retry 3 --connect-timeout 20 \
-      --output "$zip_file" "${DISPLAYLINK_ZIP_URL}"
-  fi
-
-  unzip -tq "$zip_file" >/dev/null \
-    || die "The DisplayLink ZIP archive failed integrity validation."
-
-  local actual_sha256
-  actual_sha256="$(sha256sum "$zip_file" | awk '{print $1}')"
-  {
-    printf 'expected  %s\n' "$DISPLAYLINK_ZIP_SHA256"
-    printf 'actual    %s\n' "$actual_sha256"
-  } > "${STATE_DIR}/downloaded-archive.sha256"
-  [[ "$actual_sha256" == "$DISPLAYLINK_ZIP_SHA256" ]] \
-    || die "The Synaptics archive checksum does not match the pinned DisplayLink 6.3.0-48 archive."
-
-  mkdir -p "${WORK_DIR}/zip"
-  unzip -q "$zip_file" -d "${WORK_DIR}/zip"
-  run_file="$(find "${WORK_DIR}/zip" -type f -name 'displaylink-driver-*.run' -print -quit)"
-  [[ -n "$run_file" ]] || die "No DisplayLink .run archive was found."
-  chmod 0755 "$run_file"
-
-  mkdir -p "${WORK_DIR}/payload"
-  (
-    cd "${WORK_DIR}/payload"
-    "$run_file" --keep --noexec
-  )
-
-  find "${WORK_DIR}/payload" -type f -name DisplayLinkManager -print -quit | grep -q . \
-    || die "The extracted archive does not contain DisplayLinkManager."
-  find "${WORK_DIR}/payload" -type f \( -iname 'evdi*.tar.gz' -o -iname 'evdi*.tgz' \) -print -quit | grep -q . \
-    || die "The extracted archive does not contain EVDI source."
-}
-
-extract_evdi_version() {
-  local dkms_conf=$1 version
-  version="$(awk -F= '
-    /^[[:space:]]*PACKAGE_VERSION[[:space:]]*=/ {
-      v=$2
-      gsub(/^[[:space:]"'\'' ]+|[[:space:]"'\'' ]+$/, "", v)
-      print v
-      exit
-    }
-  ' "$dkms_conf")"
-  if [[ -z "$version" ]]; then
-    version="$(basename "$(dirname "$dkms_conf")" | sed -nE 's/^evdi-([0-9][0-9A-Za-z.+~-]*)$/\1/p')"
-  fi
-  printf '%s' "$version"
-}
-
-install_evdi() {
-  local source_archive source_extract dkms_conf source_root destination kernel
-  local library_makefile jobs
-  source_archive="$(find "${WORK_DIR}/payload" -type f \
-    \( -iname 'evdi*.tar.gz' -o -iname 'evdi*.tgz' \) -print -quit)"
-  source_extract="${WORK_DIR}/evdi-source"
-  mkdir -p "$source_extract"
-  tar -xf "$source_archive" -C "$source_extract"
-
-  dkms_conf="$(find "$source_extract" -type f -name dkms.conf -print -quit)"
-  [[ -n "$dkms_conf" ]] || die "EVDI source does not contain dkms.conf."
-  source_root="$(dirname -- "$dkms_conf")"
-  EVDI_VERSION="$(extract_evdi_version "$dkms_conf")"
-  [[ "$EVDI_VERSION" =~ ^[0-9][0-9A-Za-z.+~-]*$ ]] \
-    || die "Unable to determine a safe EVDI version from the official archive."
-
-  destination="/usr/src/evdi-${EVDI_VERSION}"
-  [[ ! -e "$destination" ]] || die "EVDI source destination already exists: ${destination}"
-  mkdir -p "$destination"
-  cp -a -- "${source_root}/." "$destination/"
-  printf '%s\n' "$EVDI_VERSION" > "${STATE_DIR}/evdi-version"
-
-  kernel="$(uname -r)"
-  log "Registering and building EVDI ${EVDI_VERSION} for kernel ${kernel}."
-  dkms add -m evdi -v "$EVDI_VERSION"
-  dkms build -m evdi -v "$EVDI_VERSION" -k "$kernel"
-  dkms install -m evdi -v "$EVDI_VERSION" -k "$kernel"
-  depmod -a "$kernel"
-  modinfo -k "$kernel" evdi >/dev/null \
-    || die "EVDI was built but is not discoverable by modprobe."
-
-  library_makefile="$(find "$source_extract" -type f -path '*/library/Makefile' -print -quit)"
-  [[ -n "$library_makefile" ]] \
-    || die "EVDI source does not contain the libevdi library Makefile."
-  EVDI_LIBRARY_DIR="$(dirname -- "$library_makefile")"
-  jobs="$(nproc 2>/dev/null || printf '1')"
-
-  log "Building libevdi ${EVDI_VERSION} from the bundled EVDI source."
-  make -C "$EVDI_LIBRARY_DIR" -j"$jobs"
-  compgen -G "${EVDI_LIBRARY_DIR}/libevdi.so*" >/dev/null \
-    || die "The EVDI library build did not produce libevdi.so."
-}
-
-is_aarch64_elf() {
-  readelf -h "$1" 2>/dev/null | grep -qE 'Machine:[[:space:]]+AArch64'
-}
-
-install_userspace_driver() {
-  local manager="" candidate arch_dir firmware license_file
-  while IFS= read -r -d '' candidate; do
-    if is_aarch64_elf "$candidate"; then
-      manager="$candidate"
-      break
-    fi
-  done < <(find "${WORK_DIR}/payload" -type f -name DisplayLinkManager -print0)
-
-  [[ -n "$manager" ]] \
-    || die "The official archive does not contain an AArch64 DisplayLinkManager binary."
-  arch_dir="$(dirname -- "$manager")"
-
-  install -d -m 0755 "$INSTALL_ROOT"
-  cp -a -- "${arch_dir}/." "${INSTALL_ROOT}/"
-
-  [[ -d "$EVDI_LIBRARY_DIR" ]] \
-    || die "The built libevdi library directory is unavailable."
-  while IFS= read -r -d '' candidate; do
-    cp -a -- "$candidate" "${INSTALL_ROOT}/$(basename -- "$candidate")"
-  done < <(find "$EVDI_LIBRARY_DIR" -maxdepth 1 \
-    \( -type f -o -type l \) -name 'libevdi.so*' -print0)
-
-  while IFS= read -r -d '' firmware; do
-    cp -a -- "$firmware" "${INSTALL_ROOT}/$(basename -- "$firmware")"
-  done < <(find "${WORK_DIR}/payload" -type f -name '*.spkg' -print0)
-
-  license_file="$(find "${WORK_DIR}/payload" -type f \
-    \( -iname 'LICENSE' -o -iname 'LICENSE.txt' \) -print -quit)"
-  if [[ -n "$license_file" ]]; then
-    cp -a -- "$license_file" "${INSTALL_ROOT}/LICENSE"
-  fi
-
-  chown -R root:root "$INSTALL_ROOT"
-  chmod 0755 "${INSTALL_ROOT}/DisplayLinkManager"
-  find "$INSTALL_ROOT" -maxdepth 1 -type f -name '*.so*' -exec chmod 0755 {} + 2>/dev/null || true
-  find "$INSTALL_ROOT" -maxdepth 1 -type f -name '*.spkg' -exec chmod 0644 {} + 2>/dev/null || true
-
-  [[ -x "${INSTALL_ROOT}/DisplayLinkManager" ]] \
-    || die "DisplayLinkManager was not installed correctly."
-  compgen -G "${INSTALL_ROOT}/libevdi.so*" >/dev/null \
-    || die "The built libevdi library was not installed beside DisplayLinkManager."
-
-  if readelf -l "${INSTALL_ROOT}/DisplayLinkManager" 2>/dev/null | grep -q INTERP; then
-    if ! LD_LIBRARY_PATH="$INSTALL_ROOT" ldd "${INSTALL_ROOT}/DisplayLinkManager" \
-        > "${STATE_DIR}/displaylink-manager.ldd" 2>&1; then
-      cat "${STATE_DIR}/displaylink-manager.ldd" >&2 || true
-      die "DisplayLinkManager's runtime-library check failed."
-    fi
-    if grep -q 'not found' "${STATE_DIR}/displaylink-manager.ldd"; then
-      cat "${STATE_DIR}/displaylink-manager.ldd" >&2
-      die "DisplayLinkManager has an unresolved runtime-library dependency."
-    fi
-  fi
-
-  log "Installed only the AArch64 DisplayLink user-space files required by this monitor."
-}
-
-configure_evdi_module() {
-  # Do not preload EVDI and do not pre-create a virtual DRM device.  Both
-  # actions expose the USB display to LightDM before authentication and can
-  # alter the normal login/autologin path.  The post-login broker loads EVDI
-  # dynamically only after a verified local graphical user session is stable.
-  rm -f -- "${MODULE_LOAD_PATH}"
-
-  if [[ -f "${EVDI_MODPROBE_PATH}" ]] \
-      && grep -Fqx '# AOC I1659FWUX: create one EVDI DRM device before the compositor starts.' "${EVDI_MODPROBE_PATH}" \
-      && grep -Fqx 'options evdi initial_device_count=1' "${EVDI_MODPROBE_PATH}"; then
-    rm -f -- "${EVDI_MODPROBE_PATH}"
-  fi
-
-  depmod -a
-}
-
-install_exact_udev_rule() {
-  cat > "${UDEV_RULE_PATH}" <<UDEV
-# AOC I1659FWUX only (${AOC_USB_ID}). Grant the active local session access;
-# service startup remains tied to graphical.target, not USB hotplug.
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="${AOC_USB_VENDOR}", ATTR{idProduct}=="${AOC_USB_PRODUCT}", MODE="0660", GROUP="video", TAG+="uaccess"
-UDEV
-  chmod 0644 "${UDEV_RULE_PATH}"
-  udevadm control --reload-rules
-}
-
-install_safe_service() {
-  [[ -x "${BUNDLE_DIR}/session-broker.sh" ]] \
-    || die "session-broker.sh is missing or not executable."
-  install -m 0755 "${BUNDLE_DIR}/session-broker.sh" \
-    "${INSTALL_ROOT}/aoc-session-broker.sh"
-
-  # Remove only obsolete files from this package's previous request-file
-  # design. Raspberry Pi OS labwc did not execute that XDG helper reliably.
-  rm -f -- /etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop
-  rm -f -- /usr/local/libexec/aoc-i1659fwux-session-request.sh
-  rm -f -- /usr/local/bin/aoc-i1659fwux-session-request
-  rm -rf -- /run/aoc-i1659fwux-displaylink
-
-  cat > "${SAFE_UNIT_PATH}" <<UNIT
+    as_root tee "$BROKER_UNIT_PATH" >/dev/null <<'UNIT'
 [Unit]
 Description=AOC I1659FWUX post-login DisplayLink broker
-Documentation=${DISPLAYLINK_EULA_URL}
-After=display-manager.service systemd-user-sessions.service
-Wants=systemd-user-sessions.service
-ConditionPathExists=${INSTALL_ROOT}/aoc-session-broker.sh
-ConditionPathExists=${INSTALL_ROOT}/DisplayLinkManager
+After=systemd-logind.service multi-user.target
+Wants=systemd-logind.service
+ConditionPathExists=/opt/displaylink/DisplayLinkManager
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_ROOT}/aoc-session-broker.sh
-WorkingDirectory=${INSTALL_ROOT}
-Restart=on-failure
-RestartSec=5
-KillMode=control-group
+ExecStart=/usr/local/sbin/aoc-i1659fwux-session-broker
+Restart=always
+RestartSec=3
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target
 UNIT
-  chmod 0644 "${SAFE_UNIT_PATH}"
-  systemctl daemon-reload
-  systemctl enable "${SAFE_UNIT}" >/dev/null
-  log "Installed the direct loginctl session broker; EVDI remains inactive at LightDM."
+
+    as_root systemctl daemon-reload
+    as_root systemctl enable --now "$BROKER_UNIT"
 }
 
-start_and_verify() {
-  if (( NO_START == 0 )); then
-    systemctl restart "${SAFE_UNIT}"
-  fi
-
-  if systemctl is-active --quiet "${SAFE_UNIT}"; then
-    log "The post-login DisplayLink broker is running."
-  elif (( NO_START == 0 )); then
-    systemctl status "${SAFE_UNIT}" --no-pager || true
-    die "The post-login DisplayLink broker did not remain active."
-  fi
-
-  if command -v lsmod >/dev/null 2>&1 \
-      && lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
-    warn "EVDI was already loaded before the new broker started. A normal reboot is recommended to begin with EVDI absent at LightDM."
-  fi
-
-  if command -v lsusb >/dev/null 2>&1 && lsusb -d "${AOC_USB_ID}" >/dev/null 2>&1; then
-    log "The AOC USB monitor is connected. The broker will activate it only after a local graphical session remains stable for 45 seconds."
-  else
-    warn "The AOC monitor is not connected. It may be connected after the authenticated desktop starts."
-  fi
+record_state() {
+    local vendor_service="$1"
+    as_root install -d -m 0700 "$STATE_DIR"
+    {
+        printf 'PACKAGE_NAME=%s\n' "$PACKAGE_NAME"
+        printf 'PACKAGE_VERSION=%s\n' "$PACKAGE_VERSION"
+        printf 'TARGET_USER=%s\n' "$TARGET_USER"
+        printf 'TARGET_HOME=%s\n' "$TARGET_HOME"
+        printf 'VENDOR_SERVICE=%s\n' "$vendor_service"
+        printf 'VENDOR_SERVICE_WAS_ENABLED=%s\n' "$VENDOR_WAS_ENABLED"
+        printf 'VENDOR_SERVICE_WAS_ACTIVE=%s\n' "$VENDOR_WAS_ACTIVE"
+        printf 'OFFICIAL_DRIVER_PREEXISTED=%s\n' "$OFFICIAL_DRIVER_PREEXISTED"
+        printf 'OFFICIAL_INTERNAL_INSTALLER=%s\n' "$OFFICIAL_INTERNAL_INSTALLER"
+        printf 'INSTALL_KERNEL=%s\n' "$KERNEL"
+        printf 'INSTALL_MODEL=%s\n' "$MODEL"
+    } | as_root tee "$STATE_FILE" >/dev/null
+    as_root chmod 0600 "$STATE_FILE"
 }
 
-write_install_metadata() {
-  cat > "${STATE_DIR}/install-info" <<INFO
-package=${PACKAGE_NAME}
-package_version=${PACKAGE_VERSION}
-displaylink_release=${DISPLAYLINK_RELEASE}
-displaylink_archive_sha256=${DISPLAYLINK_ZIP_SHA256}
-evdi_version=${EVDI_VERSION}
-usb_id=${AOC_USB_ID}
-installed_at=$(date --iso-8601=seconds)
-kernel=$(uname -r)
-architecture=$(uname -m)
-model=$(read_pi_model)
-method=manual-minimal-extraction-no-vendor-installer
-startup=post-login-loginctl-stable-session-broker
-stable_session_delay_seconds=45
-INFO
-  cp -a -- "${BUNDLE_DIR}/uninstall.sh" "${STATE_DIR}/uninstall.sh"
-  cp -a -- "${BUNDLE_DIR}/status.sh" "${STATE_DIR}/status.sh"
-  cp -a -- "${BUNDLE_DIR}/session-broker.sh" "${STATE_DIR}/session-broker.sh"
-  if [[ -x "${BUNDLE_DIR}/apply-session-detection-fix.sh" ]]; then
-    cp -a -- "${BUNDLE_DIR}/apply-session-detection-fix.sh" "${STATE_DIR}/apply-session-detection-fix.sh"
-  fi
+stop_vendor_service() {
+    local vendor_service="$1"
+    as_root systemctl disable --now "$vendor_service" 2>/dev/null || true
 }
 
-run_check_only() {
-  local conflicts=()
-  collect_conflicts conflicts
-  if ((${#conflicts[@]})); then
-    printf 'Existing DisplayLink/EVDI state that would block installation:\n' >&2
-    printf '  - %s\n' "${conflicts[@]}" >&2
-    return 1
-  fi
-
-  local kernel
-  kernel="$(uname -r)"
-  if [[ -e "/lib/modules/${kernel}/build/Makefile" ]]; then
-    log "Matching kernel build headers are already available."
-  else
-    warn "Matching kernel headers are not currently installed; the installer will try the Raspberry Pi header packages."
-  fi
-  log "Compatibility checks passed. No changes were made."
+install_dependencies_and_headers() {
+    log "Installing only DisplayLink/EVDI build and runtime dependencies."
+    as_root apt-get update
+    as_root apt-get install -y ca-certificates curl unzip dkms build-essential binutils libdrm-dev libelf-dev libusb-1.0-0 libstdc++6 usbutils pkg-config
+    if [[ ! -e "/lib/modules/${KERNEL}/build" ]]; then
+        if ! as_root apt-get install -y "linux-headers-${KERNEL}"; then
+            as_root apt-get install -y raspberrypi-kernel-headers || fail "Matching kernel headers could not be installed."
+        fi
+    fi
+    [[ -e "/lib/modules/${KERNEL}/build" ]] || fail "Kernel headers do not match ${KERNEL}; reboot after updating and rerun."
 }
 
-main() {
-  parse_args "$@"
-  require_root
-  check_platform
+install_temporary_vendor_start_block() {
+    local unit dir
+    for unit in displaylink-driver.service displaylink.service; do
+        dir="${TEMP_BLOCK_ROOT}/${unit}.d"
+        as_root install -d -m 0755 "$dir"
+        as_root tee "${dir}/00-aoc-safe-install.conf" >/dev/null <<'DROPIN'
+[Unit]
+Conflicts=
 
-  if (( CHECK_ONLY == 1 )); then
-    run_check_only
+[Service]
+Type=oneshot
+ExecStartPre=
+ExecStart=
+ExecStart=/bin/true
+ExecStop=
+ExecStopPost=
+Restart=no
+RemainAfterExit=yes
+DROPIN
+    done
+    as_root systemctl daemon-reload
+}
+
+remove_temporary_vendor_start_block() {
+    local unit
+    for unit in displaylink-driver.service displaylink.service; do
+        as_root rm -f "${TEMP_BLOCK_ROOT}/${unit}.d/00-aoc-safe-install.conf"
+        as_root rmdir "${TEMP_BLOCK_ROOT}/${unit}.d" 2>/dev/null || true
+    done
+    as_root systemctl daemon-reload
+}
+
+install_official_driver() {
+    if [[ -x /opt/displaylink/DisplayLinkManager && "$ADOPT_EXISTING" == "1" ]]; then
+        if (( ! MIGRATED_PACKAGE_STATE )); then
+            OFFICIAL_DRIVER_PREEXISTED=1
+        fi
+        log "Adopting the existing official DisplayLink installation; vendor files will not be reinstalled."
+        return 0
+    fi
+    OFFICIAL_DRIVER_PREEXISTED=0
+
+    install_dependencies_and_headers
+    if [[ -e "$BASE_DIR" ]]; then
+        BASE_DIR="${BASE_DIR}-$(date +%Y%m%d-%H%M%S)"
+    fi
+    install -d -m 0755 "$BASE_DIR"
+    as_root chown "$TARGET_USER:$TARGET_USER" "$BASE_DIR"
+    local archive_path="${BASE_DIR}/DisplayLink-USB-Graphics-Software-for-Ubuntu-${DRIVER_VERSION}.zip"
+    log "Downloading the official Synaptics DisplayLink ${DRIVER_VERSION} archive."
+    as_target curl --fail --location --show-error --output "$archive_path" "$ARCHIVE_URL"
+    [[ -s "$archive_path" ]] || fail "The downloaded archive is empty."
+    local actual
+    actual="$(sha256sum "$archive_path" | awk '{print $1}')"
+    [[ "$actual" == "$ARCHIVE_SHA256" ]] || fail "Official archive checksum mismatch: ${actual}."
+    unzip -tq "$archive_path"
+    local extract_dir="${BASE_DIR}/extracted"
+    as_target mkdir -p "$extract_dir"
+    as_target unzip -q "$archive_path" -d "$extract_dir"
+    mapfile -d '' run_files < <(find "$extract_dir" -type f -name 'displaylink-driver-*.run' -print0)
+    (( ${#run_files[@]} == 1 )) || fail "Expected exactly one DisplayLink .run installer."
+    local run_file="${run_files[0]}" run_unpack="${BASE_DIR}/official-run"
+    chmod 0755 "$run_file"
+    as_target mkdir -p "$run_unpack"
+    (cd "$run_unpack" && "$run_file" --noexec --keep)
+    mapfile -d '' internal_installers < <(find "$run_unpack" -type f -name displaylink-installer.sh -print0)
+    (( ${#internal_installers[@]} == 1 )) || fail "Expected exactly one official internal installer."
+    local internal_installer="${internal_installers[0]}"
+    chmod 0755 "$internal_installer"
+    log "Running the unmodified official internal DisplayLink installer with a temporary no-op service override so it cannot start before login."
+    install_temporary_vendor_start_block
+    if ! (cd "$(dirname "$internal_installer")" && as_root ./displaylink-installer.sh install); then
+        remove_temporary_vendor_start_block
+        fail "The official DisplayLink installer failed."
+    fi
+    # Keep the temporary no-op drop-in until the permanent post-login guard and
+    # vendor udev override are both installed, eliminating the service-start
+    # race between the official installer and our broker setup.
+    OFFICIAL_INTERNAL_INSTALLER="$internal_installer"
+}
+
+recover_on_error() {
+    local exit_code=$? current_snapshot=""
+    trap - ERR
+    log "Installation failed; disabling DisplayLink startup."
+    as_root systemctl disable --now "$BROKER_UNIT" 2>/dev/null || true
+    as_root "$CONTROL_HELPER" deny 2>/dev/null || true
+    for failed_unit in displaylink-driver.service displaylink.service; do
+        as_root systemctl disable --now "$failed_unit" 2>/dev/null || true
+    done
+    as_root rm -f "$VENDOR_RULE_OVERRIDE" 2>/dev/null || true
+    as_root ln -s /dev/null "$VENDOR_RULE_OVERRIDE" 2>/dev/null || true
+    remove_temporary_vendor_start_block 2>/dev/null || true
+    as_root systemctl daemon-reload 2>/dev/null || true
+    as_root udevadm control --reload-rules 2>/dev/null || true
+    if [[ -n "${local_before:-}" && -f "${local_before:-}" ]]; then
+        current_snapshot="$(mktemp)"
+        snapshot_protected "$current_snapshot" || true
+        if ! cmp -s "$local_before" "$current_snapshot"; then
+            log "A protected login/SSH file changed during the failed installation; restoring the exact snapshot."
+            restore_protected || true
+        fi
+        rm -f "$current_snapshot"
+    fi
+    exit "$exit_code"
+}
+
+platform_check
+if (( CHECK_ONLY )); then
+    log "Safety and compatibility checks passed. No changes were made."
     exit 0
-  fi
+fi
 
-  accept_eula
-  check_existing_install
+power_warning
+cat >/dev/tty <<LICENSE
 
-  install -d -m 0750 "${LOG_DIR}"
-  install -d -m 0700 "${STATE_DIR}"
-  LOG_FILE="${LOG_DIR}/install-$(date +%Y%m%d-%H%M%S).log"
-  touch "$LOG_FILE"
-  chmod 0640 "$LOG_FILE"
-  exec > >(tee -a "$LOG_FILE") 2>&1
+The proprietary DisplayLink user-space files are governed by the Synaptics EULA:
+${EULA_PAGE}
 
-  trap rollback_on_error ERR INT TERM
-  trap cleanup_workdir EXIT
-
-  log "Beginning ${PACKAGE_NAME} ${PACKAGE_VERSION} installation."
-  snapshot_protected
-  snapshot_evdi_config
-  install_dependencies
-  download_and_extract
-  install_evdi
-  install_userspace_driver
-  configure_evdi_module
-  install_exact_udev_rule
-  install_safe_service
-  verify_and_restore_protected
-  write_install_metadata
-  start_and_verify
-
-  trap - ERR INT TERM
-  cleanup_workdir
-  WORK_DIR=""
-
-  log "Installation completed without running Synaptics' generic system installer."
-  log "No login manager, autologin, password, PAM, SSH, boot target, Wayland/X11 selection, X11 configuration, or boot configuration was changed."
-  log "EVDI and DisplayLinkManager remain inactive at LightDM and start only after a stable authenticated desktop session."
-  log "The installer did not reboot the Raspberry Pi."
-  log "Status: sudo ${STATE_DIR}/status.sh"
-  log "Uninstall: sudo ${STATE_DIR}/uninstall.sh"
+LICENSE
+prompt_exact 'Type AGREE to confirm that you reviewed and accept the EULA: ' 'AGREE' || {
+    log "EULA not accepted. No changes were made."
+    exit 0
 }
 
-main "$@"
+as_root install -d -m 0700 "$STATE_DIR"
+exec > >(as_root tee -a "$LOG_FILE") 2>&1
+trap recover_on_error ERR
+
+log "Beginning ${PACKAGE_NAME} ${PACKAGE_VERSION} installation."
+local_before="$(mktemp)"
+local_after="$(mktemp)"
+trap 'rm -f "$local_before" "$local_after"' EXIT
+snapshot_protected "$local_before"
+backup_protected
+load_previous_package_state
+disable_previous_wrappers
+install_early_usb_gate
+install_initramfs_hook_if_applicable
+
+vendor_service="$(find_vendor_service || true)"
+if [[ -n "$vendor_service" ]]; then
+    if (( ! MIGRATED_PACKAGE_STATE )); then
+        systemctl is-enabled --quiet "$vendor_service" 2>/dev/null && VENDOR_WAS_ENABLED=1 || true
+        systemctl is-active --quiet "$vendor_service" 2>/dev/null && VENDOR_WAS_ACTIVE=1 || true
+    fi
+    stop_vendor_service "$vendor_service"
+fi
+
+install_official_driver
+vendor_service="$(find_vendor_service || true)"
+[[ -n "$vendor_service" ]] || fail "Official installer completed but no DisplayLink system service was found."
+stop_vendor_service "$vendor_service"
+record_state "$vendor_service"
+backup_and_disable_vendor_udev_rule
+install_support_tools
+configure_vendor_service_post_login "$vendor_service"
+remove_temporary_vendor_start_block
+install_broker
+snapshot_protected "$local_after"
+if ! cmp -s "$local_before" "$local_after"; then
+    restore_protected
+    fail "Protected login, authentication, SSH, or display-manager files changed; they were restored and the installation was stopped."
+fi
+trap - ERR
+
+log "Installation completed without changing protected login or SSH configuration."
+cat <<DONE
+
+The AOC monitor is now quarantined during boot and at the login screen.
+It is authorized and DisplayLinkManager is started only after the existing
+${TARGET_USER} desktop session is active.
+
+The official vendor service remains disabled at boot. Its generic udev rule is
+blocked, and a service drop-in removes its tty/getty conflict and requires the
+post-login allow marker. The broker starts the same known-working official
+service only after your existing desktop is active.
+
+Reboot with the monitor connected through the mandatory separately powered USB 3 hub:
+  sudo reboot
+
+Status:
+  sudo /usr/local/sbin/aoc-i1659fwux-status
+
+Emergency safe mode:
+  sudo /usr/local/sbin/aoc-i1659fwux-repair
+
+DONE

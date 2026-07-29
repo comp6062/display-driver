@@ -1,159 +1,102 @@
 #!/usr/bin/env bash
-set -u
-IFS=$'\n\t'
+set -Eeuo pipefail
 
-PACKAGE_NAME="aoc-i1659fwux-rpi-displaylink"
-STATE_DIR="/var/lib/${PACKAGE_NAME}"
-SAFE_UNIT="aoc-i1659fwux-displaylink.service"
-AOC_USB_ID="17e9:ff10"
-RUNTIME_DIR="/run/aoc-i1659fwux-displaylink"
+STATE_DIR="/var/lib/displaylink-rpi-safe"
+STATE_FILE="${STATE_DIR}/state"
+CONTROL="/usr/local/sbin/aoc-i1659fwux-usb-control"
+BROKER_UNIT="aoc-i1659fwux-session-broker.service"
+VENDOR_SERVICE="$(sed -n 's/^VENDOR_SERVICE=//p' "$STATE_FILE" 2>/dev/null | tail -n1)"
+VENDOR_SERVICE="${VENDOR_SERVICE:-displaylink-driver.service}"
 
-section() {
-  printf '\n== %s ==\n' "$1"
-}
+section() { printf '\n===== %s =====\n' "$1"; }
+value() { systemctl "$@" 2>/dev/null || true; }
 
-read_pi_model() {
-  if [[ -r /proc/device-tree/model ]]; then
-    tr -d '\0' < /proc/device-tree/model
-  else
-    printf 'unknown'
-  fi
-}
+section "PLATFORM"
+printf 'Model:        %s\n' "$(tr -d '\0' </proc/device-tree/model 2>/dev/null || echo unknown)"
+printf 'OS:           %s\n' "$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+printf 'Architecture: %s\n' "$(dpkg --print-architecture 2>/dev/null || uname -m)"
+printf 'Kernel:       %s\n' "$(uname -r)"
 
-session_value() {
-  loginctl show-session "$1" --property="$2" --value 2>/dev/null || true
-}
-
-section "Platform"
-printf 'Model: %s\n' "$(read_pi_model)"
-printf 'Architecture: %s\n' "$(uname -m)"
-printf 'Kernel: %s\n' "$(uname -r)"
-if [[ -r /etc/os-release ]]; then
-  # shellcheck disable=SC1091
-  source /etc/os-release
-  printf 'OS: %s\n' "${PRETTY_NAME:-unknown}"
-fi
-
-section "AOC USB monitor"
-if command -v lsusb >/dev/null 2>&1 && lsusb -d "${AOC_USB_ID}" 2>/dev/null; then
-  lsusb -t 2>/dev/null | sed 's/^/USB tree: /' || true
+section "PACKAGE STATE"
+if [[ -r "$STATE_FILE" ]]; then
+    grep -E '^(PACKAGE_VERSION|TARGET_USER|VENDOR_SERVICE|OFFICIAL_DRIVER_PREEXISTED|INSTALL_KERNEL|INSTALL_MODEL)=' "$STATE_FILE" || true
 else
-  echo "Not detected (${AOC_USB_ID})."
+    echo "No package state file found."
 fi
 
-section "EVDI"
-if command -v lsmod >/dev/null 2>&1 && lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
-  echo "Kernel module: loaded"
-else
-  echo "Kernel module: not loaded"
-fi
-if [[ -r /sys/devices/evdi/version ]]; then
-  printf 'Loaded version: %s\n' "$(cat /sys/devices/evdi/version)"
-fi
-if command -v modinfo >/dev/null 2>&1; then
-  printf 'Module file: %s\n' "$(modinfo -n evdi 2>/dev/null || echo not-found)"
-fi
-if command -v dkms >/dev/null 2>&1; then
-  dkms status 2>/dev/null | grep '^evdi/' || echo "DKMS: no EVDI registration found"
-fi
-
-section "Post-login DisplayLink broker"
-systemctl status "${SAFE_UNIT}" --no-pager 2>/dev/null || true
-if [[ -r "${RUNTIME_DIR}/broker.state" ]]; then
-  echo "Broker state:"
-  sed 's/^/  /' "${RUNTIME_DIR}/broker.state"
-else
-  echo "Broker state file: not present"
-fi
-if [[ -e "${RUNTIME_DIR}/blocked-this-boot" ]]; then
-  echo "Safety block: active for this boot"
-  sed 's/^/  /' "${RUNTIME_DIR}/blocked-this-boot" 2>/dev/null || true
-else
-  echo "Safety block: not active"
-fi
-if pgrep -f '/opt/displaylink/DisplayLinkManager' >/dev/null 2>&1; then
-  echo "DisplayLinkManager: running"
-else
-  echo "DisplayLinkManager: not running"
-fi
-
-section "Login sessions"
-if command -v loginctl >/dev/null 2>&1; then
-  loginctl list-sessions --no-legend 2>/dev/null || true
-  while IFS= read -r sid; do
-    [[ -n "$sid" ]] || continue
-    printf '%s: user=%s uid=%s class=%s type=%s active=%s state=%s remote=%s\n' \
-      "$sid" \
-      "$(session_value "$sid" Name)" \
-      "$(session_value "$sid" User)" \
-      "$(session_value "$sid" Class)" \
-      "$(session_value "$sid" Type)" \
-      "$(session_value "$sid" Active)" \
-      "$(session_value "$sid" State)" \
-      "$(session_value "$sid" Remote)"
-  done < <(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}')
-else
-  echo "loginctl is unavailable."
-fi
-
-section "Graphical session processes"
-for process in labwc wayfire Xorg Xwayland weston sway gnome-shell kwin_wayland; do
-  if pgrep -x "$process" >/dev/null 2>&1; then
-    printf 'Running: %s\n' "$process"
-  fi
-done
-
-section "DRM connectors"
+section "USB DEVICE 17e9:ff10"
 found=0
-for connector in /sys/class/drm/card*-*; do
-  [[ -e "$connector" ]] || continue
-  connector_base="$(basename -- "$connector")"
-  card_name="${connector_base%%-*}"
-  card="/sys/class/drm/${card_name}"
-  driver="$(basename "$(readlink -f "${card}/device/driver" 2>/dev/null)" 2>/dev/null || true)"
-  [[ "$driver" == "evdi" ]] || continue
-  found=1
-  printf '%s: %s\n' "$connector_base" "$(cat "${connector}/status" 2>/dev/null || echo unknown)"
-  if [[ -s "${connector}/modes" ]]; then
-    sed 's/^/  mode: /' "${connector}/modes"
-  fi
+for dev in /sys/bus/usb/devices/*; do
+    [[ -r "$dev/idVendor" && -r "$dev/idProduct" ]] || continue
+    vendor="$(cat "$dev/idVendor")"
+    product="$(cat "$dev/idProduct")"
+    [[ "$vendor:$product" == "17e9:ff10" ]] || continue
+    found=1
+    printf 'Path:       %s\n' "$dev"
+    printf 'Authorized: %s\n' "$(cat "$dev/authorized" 2>/dev/null || echo unknown)"
+    printf 'Bus/dev:    %s/%s\n' "$(cat "$dev/busnum" 2>/dev/null || echo '?')" "$(cat "$dev/devnum" 2>/dev/null || echo '?')"
+    printf 'Speed:      %s Mb/s\n' "$(cat "$dev/speed" 2>/dev/null || echo unknown)"
 done
-(( found == 1 )) || echo "No EVDI connector is currently visible."
+(( found )) || echo "Monitor is not currently enumerated."
 
-section "Native-mode check"
-native=0
-for modes in /sys/class/drm/card*-*/modes; do
-  [[ -f "$modes" ]] || continue
-  connector="${modes%/*}"
-  connector_base="$(basename -- "$connector")"
-  card_name="${connector_base%%-*}"
-  card="/sys/class/drm/${card_name}"
-  driver="$(basename "$(readlink -f "${card}/device/driver" 2>/dev/null)" 2>/dev/null || true)"
-  [[ "$driver" == "evdi" ]] || continue
-  grep -qx '1920x1080' "$modes" && native=1
+section "SERVICES"
+for unit in displaylink-driver.service displaylink.service "$BROKER_UNIT"; do
+    printf '%-44s enabled=%-10s active=%s\n' \
+        "$unit" \
+        "$(systemctl is-enabled "$unit" 2>/dev/null || echo absent)" \
+        "$(systemctl is-active "$unit" 2>/dev/null || echo inactive)"
 done
-if (( native == 1 )); then
-  echo "1920x1080 is exposed."
+
+section "SESSIONS"
+loginctl list-sessions --no-legend 2>/dev/null || true
+for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+    echo "--- session ${sid} ---"
+    loginctl show-session "$sid" -p Name -p Active -p State -p Type -p Class -p Remote 2>/dev/null || true
+done
+
+section "BASELINE EVDI CONFIGURATION"
+for path in /etc/modules /etc/modules-load.d/evdi.conf /etc/modules-load.d/displaylink.conf /etc/modprobe.d/evdi.conf /etc/modprobe.d/displaylink.conf; do
+    if [[ -e "$path" || -L "$path" ]]; then
+        echo "--- ${path} ---"
+        grep -nE '(^|[[:space:]])evdi([[:space:]]|$)|initial_device_count' "$path" 2>/dev/null || echo "No EVDI preload directive."
+    fi
+done
+
+section "EVDI / DISPLAYLINK"
+lsmod | awk 'NR==1 || $1=="evdi"' || true
+pgrep -a DisplayLinkManager || echo "DisplayLinkManager is not running."
+
+section "DRM CONNECTORS"
+native_mode_found=0
+for status in /sys/class/drm/card*-*/status; do
+    [[ -e "$status" ]] || continue
+    connector="${status%/status}"
+    printf '%s: %s' "$(basename "$connector")" "$(cat "$status")"
+    if [[ -r "$connector/modes" ]]; then
+        modes="$(tr '\n' ' ' <"$connector/modes")"
+        printf ' modes=[%s]' "$modes"
+        grep -Fxq '1920x1080' "$connector/modes" && native_mode_found=1 || true
+    fi
+    printf '\n'
+done
+if (( native_mode_found )); then
+    echo "Native 1920x1080 mode is exposed by at least one DRM connector."
 else
-  echo "1920x1080 is not currently exposed by an EVDI connector."
+    echo "Native 1920x1080 mode is not currently exposed."
 fi
 
-section "User-space binary"
-if [[ -x /opt/displaylink/DisplayLinkManager ]]; then
-  command -v file >/dev/null 2>&1 && file /opt/displaylink/DisplayLinkManager 2>/dev/null || true
-  if readelf -l /opt/displaylink/DisplayLinkManager 2>/dev/null | grep -q INTERP; then
-    LD_LIBRARY_PATH=/opt/displaylink ldd /opt/displaylink/DisplayLinkManager 2>/dev/null || true
-  fi
+section "POWER / THROTTLING"
+if command -v vcgencmd >/dev/null 2>&1; then
+    vcgencmd get_throttled || true
+    vcgencmd measure_volts core 2>/dev/null || true
 else
-  echo "DisplayLinkManager is not installed at /opt/displaylink."
+    echo "vcgencmd is unavailable."
 fi
 
-section "Installation state"
-if [[ -r "${STATE_DIR}/install-info" ]]; then
-  cat "${STATE_DIR}/install-info"
-else
-  echo "No installation state found."
-fi
+grep -iE 'under.?voltage|over.?current|usb.*power' /var/log/syslog 2>/dev/null | tail -20 || true
 
-section "Recent broker log"
-journalctl -u "${SAFE_UNIT}" -n 60 --no-pager 2>/dev/null || true
+section "RECENT PACKAGE LOG"
+tail -80 "${STATE_DIR}/broker.log" 2>/dev/null || echo "No broker log yet."
+
+section "RECENT SERVICE JOURNAL"
+journalctl -u "$BROKER_UNIT" -u "$VENDOR_SERVICE" --no-pager -n 80 2>/dev/null || true

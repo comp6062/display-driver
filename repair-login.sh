@@ -1,84 +1,84 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-IFS=$'\n\t'
-umask 022
 
-PACKAGE_NAME="aoc-i1659fwux-rpi-displaylink"
-STATE_DIR="/var/lib/${PACKAGE_NAME}"
-INSTALL_ROOT="/opt/displaylink"
-SAFE_UNIT="aoc-i1659fwux-displaylink.service"
-SAFE_UNIT_PATH="/etc/systemd/system/${SAFE_UNIT}"
-UDEV_RULE_PATH="/etc/udev/rules.d/99-aoc-i1659fwux-displaylink.rules"
-AUTOSTART_PATH="/etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop"
-MODULE_LOAD_PATH="/etc/modules-load.d/aoc-i1659fwux-evdi.conf"
-EVDI_MODPROBE_PATH="/etc/modprobe.d/evdi.conf"
-RUNTIME_DIR="/run/aoc-i1659fwux-displaylink"
+[[ ${EUID} -eq 0 ]] || exec sudo "$0" "$@"
+STATE_DIR="/var/lib/displaylink-rpi-safe"
+STATE_FILE="${STATE_DIR}/state"
+CONTROL="/usr/local/sbin/aoc-i1659fwux-usb-control"
+BROKER="aoc-i1659fwux-session-broker.service"
+VENDOR_SERVICE="$(sed -n 's/^VENDOR_SERVICE=//p' "$STATE_FILE" 2>/dev/null | tail -n1)"
+VENDOR_SERVICE="${VENDOR_SERVICE:-displaylink-driver.service}"
 
-log() {
-  printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"
-}
+log() { printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"; }
 
-warn() {
-  log "WARNING: $*" >&2
-}
+if [[ "${1:-}" == "--enable" ]]; then
+    systemctl unmask "$VENDOR_SERVICE" 2>/dev/null || true
+    systemctl disable --now "$VENDOR_SERVICE" 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl enable --now "$BROKER"
+    cat <<DONE
 
-[[ ${EUID} -eq 0 ]] || {
-  log "ERROR: Run this repair through sudo." >&2
-  exit 1
-}
+The corrected post-login broker is enabled again.
+The official DisplayLink service remains disabled at boot and can start only
+after the broker creates its authenticated-session allow marker.
 
-log "Stopping the AOC driver before it can participate in another LightDM login attempt."
-systemctl disable --now "${SAFE_UNIT}" >/dev/null 2>&1 || true
-pkill -TERM -f '^/opt/displaylink/DisplayLinkManager$' >/dev/null 2>&1 || true
-sleep 1
-pkill -KILL -f '^/opt/displaylink/DisplayLinkManager$' >/dev/null 2>&1 || true
-rm -f -- "${SAFE_UNIT_PATH}" \
-  "/etc/systemd/system/graphical.target.wants/${SAFE_UNIT}" \
-  "${AUTOSTART_PATH}" "${MODULE_LOAD_PATH}" "${UDEV_RULE_PATH}"
-rm -rf -- "${RUNTIME_DIR}"
-systemctl daemon-reload >/dev/null 2>&1 || true
+Check status with:
+  sudo /usr/local/sbin/aoc-i1659fwux-status
 
-state_file="${STATE_DIR}/evdi-config/evdi.conf.state"
-backup_file="${STATE_DIR}/evdi-config/evdi.conf.before"
-if [[ -f "$state_file" ]] && grep -qx 'present' "$state_file" \
-    && [[ -e "$backup_file" || -L "$backup_file" ]]; then
-  rm -f -- "${EVDI_MODPROBE_PATH}"
-  cp -a -- "$backup_file" "${EVDI_MODPROBE_PATH}"
-elif [[ -f "$state_file" ]] && grep -qx 'absent' "$state_file"; then
-  rm -f -- "${EVDI_MODPROBE_PATH}"
-elif [[ -f "${EVDI_MODPROBE_PATH}" ]] \
-    && grep -Fq 'AOC I1659FWUX' "${EVDI_MODPROBE_PATH}" \
-    && grep -Fq 'initial_device_count=1' "${EVDI_MODPROBE_PATH}"; then
-  rm -f -- "${EVDI_MODPROBE_PATH}"
+DONE
+    exit 0
+elif [[ -n "${1:-}" ]]; then
+    echo "Usage: $0 [--enable]" >&2
+    exit 2
 fi
 
-modprobe -r evdi >/dev/null 2>&1 || true
+log "Stopping every package and legacy DisplayLink startup path."
+for unit in \
+    "$BROKER" \
+    aoc-i1659fwux-runtime.service \
+    displaylink-after-login.service \
+    aoc-i1659fwux-displaylink.service; do
+    systemctl disable --now "$unit" 2>/dev/null || true
+done
 
-version=""
-if [[ -r "${STATE_DIR}/evdi-version" ]]; then
-  version="$(cat "${STATE_DIR}/evdi-version")"
+for unit in displaylink-driver.service displaylink.service; do
+    if systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -Fxq "$unit"; then
+        systemctl disable --now "$unit" 2>/dev/null || true
+        systemctl mask --now --force "$unit" >/dev/null 2>&1 || true
+    fi
+done
+
+rm -rf /run/aoc-i1659fwux-displaylink
+if [[ -x "$CONTROL" ]]; then
+    "$CONTROL" deny || true
+else
+    for dev in /sys/bus/usb/devices/*; do
+        [[ -r "$dev/idVendor" && -r "$dev/idProduct" && -w "$dev/authorized" ]] || continue
+        [[ "$(cat "$dev/idVendor"):$(cat "$dev/idProduct")" == "17e9:ff10" ]] || continue
+        printf 0 >"$dev/authorized" || true
+    done
 fi
-if [[ -n "$version" && "$version" =~ ^[0-9][0-9A-Za-z.+~-]*$ ]] \
-    && command -v dkms >/dev/null 2>&1; then
-  if dkms remove -m evdi -v "$version" --all >/dev/null 2>&1; then
-    rm -rf -- "/usr/src/evdi-${version}"
-  else
-    warn "EVDI DKMS removal did not complete. The reboot will still remove the active in-memory device."
-  fi
-fi
 
-rm -rf -- "${INSTALL_ROOT}"
-udevadm control --reload-rules >/dev/null 2>&1 || true
-depmod -a >/dev/null 2>&1 || true
-systemctl daemon-reload >/dev/null 2>&1 || true
+modprobe -r evdi 2>/dev/null || true
+systemctl daemon-reload
+udevadm control --reload-rules 2>/dev/null || true
 
-if [[ -d "${STATE_DIR}" ]]; then
-  backup_dir="/var/backups/${PACKAGE_NAME}-login-repair-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$(dirname -- "$backup_dir")"
-  mv -- "${STATE_DIR}" "$backup_dir"
-  log "Previous driver diagnostics were preserved at ${backup_dir}."
-fi
+cat <<'DONE'
 
-log "The pre-login DisplayLink service and EVDI preload have been removed."
-log "No password, PAM, user, autologin, LightDM, SSH, or boot-target setting was changed."
-log "Reboot now. The original desktop/autologin path should return after the reboot."
+DisplayLink is now in emergency safe mode:
+  - the official vendor service is masked;
+  - the AOC USB device is quarantined;
+  - EVDI is unloaded;
+  - no login, password, PAM, LightDM, SSH, or autologin file was changed.
+
+Reboot with HDMI connected. The AOC may remain physically connected only when
+it is connected through a separately powered USB 3 hub:
+
+  sudo reboot
+
+After confirming the original desktop/login behaviour is restored, re-enable
+the corrected post-login broker with:
+
+  sudo /usr/local/sbin/aoc-i1659fwux-repair --enable
+
+DONE

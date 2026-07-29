@@ -1,134 +1,111 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-IFS=$'\n\t'
-umask 022
 
-PACKAGE_NAME="aoc-i1659fwux-rpi-displaylink"
-STATE_DIR="/var/lib/${PACKAGE_NAME}"
-LOG_DIR="/var/log/${PACKAGE_NAME}"
-INSTALL_ROOT="/opt/displaylink"
-SAFE_UNIT="aoc-i1659fwux-displaylink.service"
-SAFE_UNIT_PATH="/etc/systemd/system/${SAFE_UNIT}"
-UDEV_RULE_PATH="/etc/udev/rules.d/99-aoc-i1659fwux-displaylink.rules"
-MODULE_LOAD_PATH="/etc/modules-load.d/aoc-i1659fwux-evdi.conf"
-EVDI_MODPROBE_PATH="/etc/modprobe.d/evdi.conf"
-KEEP_BACKUP=0
+[[ ${EUID} -eq 0 ]] || exec sudo "$0" "$@"
+STATE_DIR="/var/lib/displaylink-rpi-safe"
+STATE_FILE="${STATE_DIR}/state"
+REMOVE_OFFICIAL=0
 
-log() {
-  printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"
+if [[ "${1:-}" == "--remove-official-driver" ]]; then
+    REMOVE_OFFICIAL=1
+elif [[ -n "${1:-}" ]]; then
+    echo "Usage: $0 [--remove-official-driver]" >&2
+    exit 2
+fi
+
+get_state() { sed -n "s/^$1=//p" "$STATE_FILE" 2>/dev/null | tail -n1; }
+VENDOR_SERVICE="$(get_state VENDOR_SERVICE)"
+VENDOR_SERVICE="${VENDOR_SERVICE:-displaylink-driver.service}"
+VENDOR_WAS_ENABLED="$(get_state VENDOR_SERVICE_WAS_ENABLED)"
+VENDOR_WAS_ACTIVE="$(get_state VENDOR_SERVICE_WAS_ACTIVE)"
+OFFICIAL_PREEXISTED="$(get_state OFFICIAL_DRIVER_PREEXISTED)"
+OFFICIAL_INTERNAL_INSTALLER="$(get_state OFFICIAL_INTERNAL_INSTALLER)"
+
+restore_migrated_evdi_state_if_present() {
+    local backup_dir="${STATE_DIR}/evdi-boot-config"
+    local manifest="${backup_dir}/manifest"
+    [[ -f "$manifest" ]] || return 0
+    local state path rel
+    while IFS='|' read -r state path; do
+        [[ -n "$path" ]] || continue
+        rm -rf -- "$path"
+        if [[ "$state" == "EXISTS" ]]; then
+            rel="${path#/}"
+            if [[ -e "$backup_dir/root/$rel" || -L "$backup_dir/root/$rel" ]]; then
+                install -d -m 0755 "$(dirname "$path")"
+                cp -a "$backup_dir/root/$rel" "$path"
+            fi
+        fi
+    done <"$manifest"
 }
 
-warn() {
-  log "WARNING: $*" >&2
-}
+systemctl disable --now aoc-i1659fwux-session-broker.service 2>/dev/null || true
+systemctl disable --now aoc-i1659fwux-runtime.service 2>/dev/null || true
+systemctl stop "$VENDOR_SERVICE" 2>/dev/null || true
+/usr/local/sbin/aoc-i1659fwux-usb-control deny 2>/dev/null || true
 
-die() {
-  log "ERROR: $*" >&2
-  exit 1
-}
+rm -f \
+    /etc/systemd/system/aoc-i1659fwux-session-broker.service \
+    /etc/systemd/system/aoc-i1659fwux-runtime.service \
+    /usr/local/sbin/aoc-i1659fwux-session-broker \
+    /usr/local/sbin/aoc-i1659fwux-usb-control \
+    /usr/local/sbin/aoc-i1659fwux-udev-policy \
+    /usr/local/sbin/aoc-i1659fwux-status \
+    /usr/local/sbin/aoc-i1659fwux-repair \
+    /usr/local/sbin/aoc-i1659fwux-uninstall \
+    /etc/udev/rules.d/00-aoc-i1659fwux-quarantine.rules \
+    /etc/initramfs-tools/hooks/aoc-i1659fwux-quarantine \
+    "/etc/systemd/system/${VENDOR_SERVICE}.d/90-aoc-i1659fwux-post-login.conf"
+rmdir "/etc/systemd/system/${VENDOR_SERVICE}.d" 2>/dev/null || true
 
-usage() {
-  cat <<'USAGE'
-Usage: sudo ./uninstall.sh [--keep-backup]
+rm -f /etc/udev/rules.d/99-displaylink.rules
+if [[ -e "${STATE_DIR}/vendor-udev/99-displaylink.rules.original" || \
+      -L "${STATE_DIR}/vendor-udev/99-displaylink.rules.original" ]]; then
+    cp -a "${STATE_DIR}/vendor-udev/99-displaylink.rules.original" \
+        /etc/udev/rules.d/99-displaylink.rules
+fi
 
-Removes this package's DisplayLink user-space files, post-login broker, exact
-AOC udev rule, and EVDI DKMS registration. It restores any evdi.conf file that
-existed before installation. Dependency packages are deliberately retained.
-USAGE
-}
+restore_migrated_evdi_state_if_present
+systemctl unmask "$VENDOR_SERVICE" 2>/dev/null || true
+systemctl daemon-reload
+udevadm control --reload-rules 2>/dev/null || true
 
-restore_evdi_config() {
-  rm -f -- "${MODULE_LOAD_PATH}"
-  rm -f -- "${UDEV_RULE_PATH}"
+# The exact AOC device may still be deauthorized from the package's last safe
+# state. Re-authorize it now that the quarantine rule has been removed.
+for dev in /sys/bus/usb/devices/*; do
+    [[ -r "$dev/idVendor" && -r "$dev/idProduct" && -w "$dev/authorized" ]] || continue
+    [[ "$(cat "$dev/idVendor"):$(cat "$dev/idProduct")" == "17e9:ff10" ]] || continue
+    printf 1 >"$dev/authorized" || true
+done
+udevadm settle --timeout=15 2>/dev/null || true
 
-  local state_file="${STATE_DIR}/evdi-config/evdi.conf.state"
-  local backup="${STATE_DIR}/evdi-config/evdi.conf.before"
-  if [[ -f "$state_file" ]] && grep -qx 'present' "$state_file" \
-      && [[ -e "$backup" || -L "$backup" ]]; then
-    rm -f -- "${EVDI_MODPROBE_PATH}"
-    cp -a -- "$backup" "${EVDI_MODPROBE_PATH}"
-  elif [[ -f "$state_file" ]] && grep -qx 'absent' "$state_file"; then
-    rm -f -- "${EVDI_MODPROBE_PATH}"
-  fi
-}
-
-remove_evdi() {
-  local version=""
-  if [[ -r "${STATE_DIR}/evdi-version" ]]; then
-    version="$(cat "${STATE_DIR}/evdi-version")"
-  fi
-
-  modprobe -r evdi >/dev/null 2>&1 || true
-
-  if [[ -n "$version" && "$version" =~ ^[0-9][0-9A-Za-z.+~-]*$ ]]; then
-    if command -v dkms >/dev/null 2>&1; then
-      if dkms remove -m evdi -v "$version" --all; then
-        rm -rf -- "/usr/src/evdi-${version}"
-      else
-        warn "EVDI DKMS removal failed; preserving /usr/src/evdi-${version} for manual recovery."
-      fi
+if (( REMOVE_OFFICIAL )) || [[ "$OFFICIAL_PREEXISTED" != "1" ]]; then
+    if [[ -n "$OFFICIAL_INTERNAL_INSTALLER" && -x "$OFFICIAL_INTERNAL_INSTALLER" ]]; then
+        (cd "$(dirname "$OFFICIAL_INTERNAL_INSTALLER")" && ./displaylink-installer.sh uninstall) || true
+    elif [[ -x /opt/displaylink/displaylink-installer.sh ]]; then
+        /opt/displaylink/displaylink-installer.sh uninstall || true
     else
-      warn "DKMS is unavailable; preserving /usr/src/evdi-${version} for manual recovery."
+        systemctl disable --now displaylink-driver.service displaylink.service 2>/dev/null || true
+        rm -f /etc/systemd/system/displaylink-driver.service /etc/systemd/system/displaylink.service
+        rm -f /lib/systemd/system/displaylink-driver.service /usr/lib/systemd/system/displaylink-driver.service
+        rm -rf /opt/displaylink
+        rm -f /etc/udev/rules.d/99-displaylink.rules /lib/udev/rules.d/99-displaylink.rules /usr/lib/udev/rules.d/99-displaylink.rules
+        rm -f /etc/X11/xorg.conf.d/20-displaylink.conf
+        for version in $(dkms status 2>/dev/null | sed -n 's/^evdi\/\([^,]*\).*/\1/p'); do
+            dkms remove "evdi/${version}" --all 2>/dev/null || true
+        done
     fi
-  else
-    warn "The package's recorded EVDI version is unavailable."
-    warn "No unrecorded EVDI DKMS registration will be removed automatically."
-  fi
-}
+else
+    [[ "$VENDOR_WAS_ENABLED" == "1" ]] && systemctl enable "$VENDOR_SERVICE" 2>/dev/null || true
+    [[ "$VENDOR_WAS_ACTIVE" == "1" ]] && systemctl start "$VENDOR_SERVICE" 2>/dev/null || true
+fi
 
-main() {
-  while (($#)); do
-    case "$1" in
-      --keep-backup) KEEP_BACKUP=1 ;;
-      -h|--help) usage; exit 0 ;;
-      *) die "Unknown option: $1" ;;
-    esac
-    shift
-  done
+if command -v update-initramfs >/dev/null 2>&1 && \
+   ls /boot/initrd.img-* /boot/firmware/initrd.img-* >/dev/null 2>&1; then
+    update-initramfs -u -k "$(uname -r)" || true
+fi
 
-  [[ ${EUID} -eq 0 ]] || die "Run this uninstaller with sudo."
-  [[ -d "${STATE_DIR}" ]] || die "No ${PACKAGE_NAME} installation state was found."
+rm -rf "$STATE_DIR"
+systemctl daemon-reload
 
-  install -d -m 0750 "${LOG_DIR}"
-  local log_file="${LOG_DIR}/uninstall-$(date +%Y%m%d-%H%M%S).log"
-  touch "$log_file"
-  chmod 0640 "$log_file"
-  exec > >(tee -a "$log_file") 2>&1
-
-  log "Stopping and removing the AOC post-login DisplayLink broker."
-  systemctl disable --now "${SAFE_UNIT}" >/dev/null 2>&1 || true
-  rm -f -- "${SAFE_UNIT_PATH}"
-  systemctl daemon-reload
-
-  remove_evdi
-  rm -rf -- "${INSTALL_ROOT}"
-  rm -f -- /etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop
-  rm -f -- /usr/local/libexec/aoc-i1659fwux-session-request.sh
-  rm -f -- /usr/local/bin/aoc-i1659fwux-session-request
-  rm -rf -- /run/aoc-i1659fwux-displaylink
-  restore_evdi_config
-
-  udevadm control --reload-rules >/dev/null 2>&1 || true
-  depmod -a || true
-  systemctl daemon-reload
-
-  if lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
-    warn "EVDI is still in memory because the graphical session is using it. It will be gone after the next normal reboot."
-  fi
-
-  if (( KEEP_BACKUP == 1 )); then
-    local backup="/var/backups/${PACKAGE_NAME}-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$(dirname -- "$backup")"
-    mv -- "${STATE_DIR}" "$backup"
-    log "Installation state preserved at ${backup}."
-  else
-    rm -rf -- "${STATE_DIR}"
-  fi
-
-  log "Uninstallation completed."
-  log "Dependency packages were retained to avoid removing software another program may use."
-  log "No login, authentication, network, boot, compositor, or desktop-session setting was changed."
-  log "No automatic reboot was performed."
-}
-
-main "$@"
+echo "AOC boot-safe DisplayLink package removed. Login, SSH, PAM, and autologin configuration were not changed."
