@@ -1,1244 +1,397 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 IFS=$'\n\t'
+umask 077
 
-PROJECT_NAME="AOC I1659FWUX Raspberry Pi 4/5 DisplayLink Driver"
-PROJECT_VERSION="1.1.0-single-file"
-DISPLAYLINK_VERSION="6.3"
-DISPLAYLINK_ZIP_URL="https://www.synaptics.com/sites/default/files/exe_files/2026-06/DisplayLink%20USB%20Graphics%20Software%20for%20Ubuntu6.3-EXE.zip"
-DISPLAYLINK_EULA_URL="https://www.synaptics.com/products/displaylink-usb-graphics-software-ubuntu-63?filetype=exe"
-AOC_USB_ID="17e9:ff10"
-INSTALL_ROOT="/opt/aoc-i1659fwux-displaylink"
-STATE_DIR="/var/lib/aoc-i1659fwux-displaylink"
-SERVICE_FILE="/etc/systemd/system/aoc-i1659fwux-displaylink.service"
-MODPROBE_FILE="/etc/modprobe.d/aoc-i1659fwux-evdi.conf"
-MODULES_LOAD_FILE="/etc/modules-load.d/aoc-i1659fwux-evdi.conf"
-UDEV_RULE_FILE="/etc/udev/rules.d/85-aoc-i1659fwux-displaylink.rules"
-RESOLUTION_HELPER="/usr/local/bin/aoc-i1659fwux-resolution"
-DIAGNOSTICS_HELPER="/usr/local/bin/aoc-i1659fwux-diagnostics"
-AUTOSTART_FILE="/etc/xdg/autostart/aoc-i1659fwux-resolution.desktop"
-LOG_FILE="/var/log/aoc-i1659fwux-displaylink-install.log"
-SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
-MANAGER_HELPER="/usr/local/sbin/aoc-i1659fwux-driver"
-
-ACCEPT_EULA=0
-ENABLE_RESOLUTION_HELPER=1
-FORCE_UNSUPPORTED_KERNEL=0
-OFFLINE_ZIP=""
-KEEP_DOWNLOAD=0
-WORK_DIR=""
-DRIVER_ZIP=""
-PAYLOAD_DIR=""
-EVDI_VERSION=""
-EVDI_SOURCE_ROOT=""
-INSTALL_STARTED=0
-LOG_ACTIVE=0
-
-
-write_preflight_payload() {
-    cat <<'AOC_PREFLIGHT_PAYLOAD_EOF'
-#!/usr/bin/env bash
-set -u
-IFS=$'\n\t'
-
-USB_ID="17e9:ff10"
-PASS=0
-WARN=0
-FAIL=0
-
-ok() { printf '[PASS] %s\n' "$*"; PASS=$((PASS+1)); }
-warning() { printf '[WARN] %s\n' "$*"; WARN=$((WARN+1)); }
-fail() { printf '[FAIL] %s\n' "$*"; FAIL=$((FAIL+1)); }
-
-arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-case "$arch" in
-    arm64|aarch64) ok "64-bit ARM architecture detected: $arch" ;;
-    *) fail "Expected arm64/aarch64, detected: $arch" ;;
-esac
-
-if [[ -r /proc/device-tree/model ]]; then
-        model="$(tr -d '\0' </proc/device-tree/model)"
-    else
-        model=""
-    fi
-if [[ "$model" == *"Raspberry Pi 4"* || "$model" == *"Raspberry Pi 5"* ]]; then
-    ok "$model"
-else
-    fail "Expected Raspberry Pi 4 or Raspberry Pi 5 hardware, detected: ${model:-unknown}"
-fi
-
-if [[ -e "/lib/modules/$(uname -r)/build/Makefile" ]]; then
-    ok "Matching kernel headers are present for $(uname -r)."
-else
-    warning "Matching kernel headers are not currently installed for $(uname -r); the installer will try Raspberry Pi OS header packages."
-fi
-
-kernel_mm="$(uname -r | grep -oE '^[0-9]+\.[0-9]+' || true)"
-if [[ -n "$kernel_mm" ]]; then
-    major="${kernel_mm%%.*}"
-    minor="${kernel_mm#*.}"
-    value=$((10#$major * 1000 + 10#$minor))
-    if (( value >= 4015 && value <= 6015 )); then
-        ok "Kernel $kernel_mm is within the official DisplayLink 6.3 verified range."
-    else
-        warning "Kernel $kernel_mm is outside the official verified 4.15-6.15 range."
-    fi
-else
-    fail "Could not parse the kernel version."
-fi
-
-if command -v lsusb >/dev/null 2>&1; then
-    if lsusb -d "$USB_ID" >/dev/null 2>&1; then
-        ok "AOC I1659FWUX detected as USB $USB_ID."
-    else
-        warning "AOC I1659FWUX USB $USB_ID is not connected. Installation can still proceed."
-    fi
-else
-    warning "lsusb is not installed; the installer will add usbutils."
-fi
-
-conflicts=()
-[[ -e /opt/displaylink ]] && conflicts+=("/opt/displaylink")
-for existing_path in \
-    /usr/lib/displaylink \
-    /usr/libexec/displaylink \
-    /usr/share/displaylink \
-    /usr/share/displaylink-driver \
-    /etc/udev/rules.d/99-displaylink.rules \
-    /etc/modprobe.d/evdi.conf \
-    /etc/modules-load.d/evdi.conf \
-    /lib/systemd/system/displaylink-driver.service \
-    /usr/lib/systemd/system/displaylink-driver.service; do
-    [[ -e "$existing_path" ]] && conflicts+=("$existing_path")
-done
-dpkg-query -W -f='${Status}' displaylink-driver 2>/dev/null | grep -q 'install ok installed' && conflicts+=("displaylink-driver APT package")
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -Eq '^(displaylink-driver|displaylink|dlm)\.service$'; then
-    conflicts+=("existing DisplayLink service")
-fi
-if command -v dkms >/dev/null 2>&1 && dkms status 2>/dev/null | grep -qE '^evdi[/, ]'; then
-    conflicts+=("existing EVDI DKMS module")
-fi
-if lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
-    conflicts+=("already-loaded EVDI kernel module")
-fi
-
-if (( ${#conflicts[@]} == 0 )); then
-    ok "No conflicting DisplayLink/EVDI installation was detected."
-else
-    fail "Conflict detected: ${conflicts[*]}. Remove it with its own uninstaller before using this package."
-fi
-
-session="${XDG_SESSION_TYPE:-unknown}"
-case "$session" in
-    x11) ok "X11 session detected; the optional resolution helper can operate." ;;
-    wayland) warning "Wayland session detected. The package will not switch sessions or modify the compositor; resolution correction will remain inactive." ;;
-    *) warning "Session type is $session. Run this preflight from the graphical desktop for a more complete result." ;;
-esac
-
-printf '\nSummary: %d passed, %d warnings, %d failed.\n' "$PASS" "$WARN" "$FAIL"
-if (( FAIL > 0 )); then
-    exit 1
-fi
-AOC_PREFLIGHT_PAYLOAD_EOF
-}
-
-write_diagnostics_payload() {
-    cat <<'AOC_DIAGNOSTICS_PAYLOAD_EOF'
-#!/usr/bin/env bash
-set -u
-IFS=$'\n\t'
-
-USB_ID="17e9:ff10"
-OUTPUT_FILE="${1:-$HOME/aoc-i1659fwux-diagnostics-$(date '+%Y%m%d-%H%M%S').txt}"
-
-section() {
-    printf '\n================ %s ================\n' "$1"
-}
-
-command_output() {
-    local title="$1"
-    shift
-    section "$title"
-    "$@" 2>&1 || true
-}
-
-{
-    printf 'AOC I1659FWUX Raspberry Pi 4/5 DisplayLink diagnostics\n'
-    printf 'Generated: %s\n' "$(date --iso-8601=seconds)"
-
-    section "Platform"
-    printf 'Kernel: %s\n' "$(uname -a)"
-    printf 'Architecture: %s\n' "$(dpkg --print-architecture 2>/dev/null || uname -m)"
-    if [[ -r /proc/device-tree/model ]]; then
-        printf 'Hardware: %s\n' "$(tr -d '\0' </proc/device-tree/model)"
-    else
-        printf 'Hardware: unknown\n'
-    fi
-    printf 'OS release:\n'
-    sed -n '1,20p' /etc/os-release 2>/dev/null || true
-    printf 'Session type: %s\n' "${XDG_SESSION_TYPE:-unknown}"
-    printf 'Desktop: %s\n' "${XDG_CURRENT_DESKTOP:-unknown}"
-    printf 'Display variable: %s\n' "${DISPLAY:-unset}"
-    printf 'Wayland display: %s\n' "${WAYLAND_DISPLAY:-unset}"
-
-    section "Kernel headers"
-    if [[ -e "/lib/modules/$(uname -r)/build/Makefile" ]]; then
-        printf 'Matching headers: present\n'
-        readlink -f "/lib/modules/$(uname -r)/build" || true
-    else
-        printf 'Matching headers: MISSING\n'
-    fi
-
-    command_output "AOC USB device" lsusb -v -d "$USB_ID"
-    command_output "All DisplayLink USB devices" bash -c "lsusb | grep -i -E '17e9|displaylink|aoc' || true"
-    command_output "DKMS status" dkms status
-    command_output "EVDI module information" modinfo evdi
-    command_output "Loaded EVDI module" bash -c "lsmod | grep -E '^evdi|^drm' || true"
-    command_output "EVDI sysfs" bash -c "for f in /sys/devices/evdi/version /sys/devices/evdi/count; do [ -r \"\$f\" ] && echo \"\$f: \$(cat \"\$f\")\"; done"
-
-    section "DRM connectors"
-    for connector in /sys/class/drm/card*-*; do
-        [[ -e "$connector" ]] || continue
-        printf '\n%s\n' "$connector"
-        printf '  status: %s\n' "$(cat "$connector/status" 2>/dev/null || echo unknown)"
-        printf '  enabled: %s\n' "$(cat "$connector/enabled" 2>/dev/null || echo unknown)"
-        printf '  modes: '
-        tr '\n' ' ' < "$connector/modes" 2>/dev/null || true
-        printf '\n'
-        printf '  driver: %s\n' "$(basename "$(readlink -f "$connector/device/driver" 2>/dev/null || echo unknown)")"
-    done
-
-    command_output "DisplayLink service status" systemctl --no-pager --full status aoc-i1659fwux-displaylink.service
-    command_output "DisplayLink service journal" journalctl -b --no-pager -u aoc-i1659fwux-displaylink.service -n 150
-    command_output "Recent EVDI/DisplayLink kernel messages" bash -c "dmesg 2>/dev/null | grep -i -E 'evdi|displaylink|17e9|ff10|usb [0-9].*error|drm' | tail -n 250 || true"
-
-    if [[ -n "${DISPLAY:-}" ]] && command -v xrandr >/dev/null 2>&1; then
-        command_output "Xrandr providers" xrandr --listproviders
-        command_output "Xrandr outputs" xrandr --query
-        command_output "Xrandr properties" xrandr --props
-    else
-        section "Xrandr"
-        printf 'Not collected because DISPLAY is unset or xrandr is unavailable.\n'
-    fi
-
-    section "Package-owned configuration"
-    for file in \
-        /etc/systemd/system/aoc-i1659fwux-displaylink.service \
-        /etc/modprobe.d/aoc-i1659fwux-evdi.conf \
-        /etc/modules-load.d/aoc-i1659fwux-evdi.conf \
-        /etc/udev/rules.d/85-aoc-i1659fwux-displaylink.rules \
-        /var/lib/aoc-i1659fwux-displaylink/install-state; do
-        printf '\n--- %s ---\n' "$file"
-        if [[ -r "$file" ]]; then
-            cat "$file"
-        else
-            printf 'not present or not readable\n'
-        fi
-    done
-} > "$OUTPUT_FILE"
-
-printf 'Diagnostics saved to: %s\n' "$OUTPUT_FILE"
-AOC_DIAGNOSTICS_PAYLOAD_EOF
-}
-
-write_resolution_payload() {
-    cat <<'AOC_RESOLUTION_PAYLOAD_EOF'
-#!/usr/bin/env bash
-set -u
-IFS=$'\n\t'
-
-USB_ID="17e9:ff10"
-TARGET_MODE="1920x1080"
-CUSTOM_MODE="AOC-I1659FWUX-1920x1080-60"
-QUIET=0
-DRY_RUN=0
-WAIT_SECONDS=0
-LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
-LOG_FILE="$LOG_DIR/aoc-i1659fwux-resolution.log"
-
-usage() {
-    cat <<'HELP'
-Usage: aoc-i1659fwux-resolution [--quiet] [--dry-run] [--wait SECONDS]
-
-Checks only the EVDI output associated with an attached AOC I1659FWUX and sets
-1920x1080 when the monitor is connected at an incompatible resolution. It does
-not change primary-display, position, rotation, mirroring, HDMI, or login settings.
-
-Options:
-  --quiet         Write only to the per-user cache log.
-  --dry-run       Report the xrandr command without applying it.
-  --wait SECONDS  Wait for the EVDI X11 connector to appear after login.
-HELP
-}
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --quiet)
-            QUIET=1
-            shift
-            ;;
-        --dry-run)
-            DRY_RUN=1
-            shift
-            ;;
-        --wait)
-            [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || {
-                printf '%s\n' "--wait requires a non-negative number of seconds." >&2
-                exit 2
-            }
-            WAIT_SECONDS="$2"
-            shift 2
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            printf 'Unknown option: %s\n\n' "$1" >&2
-            usage >&2
-            exit 2
-            ;;
-    esac
-done
-
-mkdir -p "$LOG_DIR" 2>/dev/null || true
-
-say() {
-    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE" 2>/dev/null || true
-    if (( QUIET == 0 )); then
-        printf '%s\n' "$*"
-    fi
-}
-
-run() {
-    if (( DRY_RUN == 1 )); then
-        say "Would run: $*"
-        return 0
-    fi
-    "$@"
-}
-
-if [[ -z "${DISPLAY:-}" ]]; then
-    say "No graphical DISPLAY is available; no resolution change was attempted."
-    exit 0
-fi
-
-if ! command -v xrandr >/dev/null 2>&1; then
-    say "xrandr is unavailable; no resolution change was attempted."
-    exit 0
-fi
-
-session_type="${XDG_SESSION_TYPE:-}"
-if [[ -z "$session_type" && -n "${XDG_SESSION_ID:-}" ]] && command -v loginctl >/dev/null 2>&1; then
-    session_type="$(loginctl show-session "$XDG_SESSION_ID" -p Type --value 2>/dev/null || true)"
-fi
-if [[ "$session_type" == "wayland" ]]; then
-    say "Wayland session detected. This helper does not change compositor settings; the driver remains installed without forcing a session change."
-    exit 0
-fi
-
-if command -v lsusb >/dev/null 2>&1 && ! lsusb -d "$USB_ID" >/dev/null 2>&1; then
-    say "AOC I1659FWUX USB device $USB_ID is not connected."
-    exit 0
-fi
-
-find_evdi_output() {
-    local drm_path driver_path connector candidate
-    local -a connected_outputs=()
-
-    mapfile -t connected_outputs < <(xrandr --query 2>/dev/null | awk '$2=="connected" {print $1}')
-    (( ${#connected_outputs[@]} > 0 )) || return 1
-
-    for drm_path in /sys/class/drm/card*-*; do
-        [[ -d "$drm_path" ]] || continue
-        [[ "$(cat "$drm_path/status" 2>/dev/null || true)" == "connected" ]] || continue
-
-        driver_path="$(readlink -f "$drm_path/device/driver" 2>/dev/null || true)"
-        [[ "$(basename "$driver_path")" == "evdi" ]] || continue
-
-        connector="$(basename "$drm_path")"
-        connector="${connector#card*-}"
-        for candidate in "${connected_outputs[@]}"; do
-            if [[ "$candidate" == "$connector" || "$candidate" == "$connector"-* ]]; then
-                printf '%s\n' "$candidate"
-                return 0
-            fi
-        done
-    done
-
-    # Older Xorg stacks may not preserve the DRM connector name. Restrict the
-    # fallback to names historically used only for EVDI/DisplayLink outputs.
-    for candidate in "${connected_outputs[@]}"; do
-        if [[ "$candidate" == DVI-I-* || "$candidate" == DisplayLink-* ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-output=""
-deadline=$((SECONDS + WAIT_SECONDS))
-while :; do
-    output="$(find_evdi_output || true)"
-    [[ -n "$output" ]] && break
-
-    if (( SECONDS >= deadline )); then
-        say "No connected EVDI/DisplayLink X11 output was identified; no other output was changed."
-        exit 0
-    fi
-    sleep 1
-done
-
-current_line="$(xrandr --query 2>/dev/null | awk -v out="$output" '$1==out && $2=="connected" {print; exit}')"
-if [[ "$current_line" == *"${TARGET_MODE}+"* ]]; then
-    say "$output is already using $TARGET_MODE; no change was needed."
-    exit 0
-fi
-
-if xrandr --query 2>/dev/null | awk -v out="$output" -v mode="$TARGET_MODE" '
-    $1==out && $2=="connected" {inside=1; next}
-    inside && $1 !~ /^[0-9]/ {inside=0}
-    inside && $1==mode {found=1}
-    END {exit !found}
-'; then
-    if run xrandr --output "$output" --mode "$TARGET_MODE"; then
-        say "Set only $output to $TARGET_MODE using the monitor-provided mode."
-        exit 0
-    fi
-fi
-
-# CVT 1920x1080 at 60 Hz. This mode is added only to the identified EVDI output.
-modeline=(173.00 1920 2048 2248 2576 1080 1083 1088 1120 -hsync +vsync)
-
-if ! xrandr --query 2>/dev/null | grep -Fq "$CUSTOM_MODE"; then
-    run xrandr --newmode "$CUSTOM_MODE" "${modeline[@]}" || {
-        say "Could not create a 1920x1080 mode; no display settings were changed."
-        exit 0
-    }
-fi
-
-run xrandr --addmode "$output" "$CUSTOM_MODE" || {
-    say "Could not add the custom mode to $output; no other output was changed."
-    exit 0
-}
-
-if run xrandr --output "$output" --mode "$CUSTOM_MODE"; then
-    say "Corrected only $output to 1920x1080 at 60 Hz."
-else
-    say "The monitor rejected the custom mode; no other output was changed."
-fi
-AOC_RESOLUTION_PAYLOAD_EOF
-}
-
-usage() {
-    cat <<USAGE
-$PROJECT_NAME single-file installer v$PROJECT_VERSION
-
-Usage:
-  ./$(basename "$SCRIPT_PATH") --validate
-  ./$(basename "$SCRIPT_PATH") --preflight
-  sudo ./$(basename "$SCRIPT_PATH") [installation options]
-  ./$(basename "$SCRIPT_PATH") --diagnostics [OUTPUT_FILE]
-  sudo ./$(basename "$SCRIPT_PATH") --uninstall
-  sudo ./$(basename "$SCRIPT_PATH") --rollback
-
-Installation options:
-  --accept-displaylink-eula   Confirm acceptance of the Synaptics DisplayLink EULA.
-  --driver-zip PATH           Use a previously downloaded official DisplayLink 6.3 ZIP.
-  --no-resolution-helper     Do not install the post-login 1920x1080 correction helper.
-  --force-unsupported-kernel Continue when the kernel is outside the verified 4.15-6.15 range.
-  --keep-download            Keep the downloaded official ZIP beside this script.
-  -h, --help                 Show this help.
-
-The ZIP package contains only this Bash file. Its built-in modes provide
-validation, preflight, installation, diagnostics, automatic rollback, and
-uninstallation.
-
-This installer intentionally does not modify login-manager, autologin, PAM,
-Wayland/X11 selection, Xorg configuration, HDMI settings, desktop layout,
-or Raspberry Pi boot display settings.
-USAGE
-}
+PACKAGE_NAME="aoc-i1659fwux-rpi-displaylink-driver-0.2.2"
+PAYLOAD_SHA256="505ff1fd182741e63c2b91fc67d3b19b91b1162d57391af47997e15afffcccb4"
+PAYLOAD_SIZE="17595"
+TEMP_DIR=""
 
 log() {
-    local msg="$*" line
-    line="[$(date '+%Y-%m-%d %H:%M:%S')] $msg"
-    printf '%s\n' "$line"
-    if (( LOG_ACTIVE == 1 )); then
-        printf '%s\n' "$line" >> "$LOG_FILE"
-    fi
-}
-
-warn() {
-    log "WARNING: $*"
+  printf '[REMOTE %(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$*"
 }
 
 die() {
-    log "ERROR: $*"
-    if (( INSTALL_STARTED == 1 )); then
-        rollback_install 1
-    fi
-    exit 1
+  log "ERROR: $*" >&2
+  exit 1
 }
 
-require_root() {
-    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-        die "Run this installer with sudo: sudo ./$(basename "$SCRIPT_PATH")"
-    fi
+cleanup() {
+  if [[ -n "${TEMP_DIR}" && -d "${TEMP_DIR}" ]]; then
+    rm -rf -- "${TEMP_DIR}"
+  fi
 }
 
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --accept-displaylink-eula)
-                ACCEPT_EULA=1
-                shift
-                ;;
-            --driver-zip)
-                [[ $# -ge 2 ]] || die "--driver-zip requires a path."
-                OFFLINE_ZIP="$2"
-                shift 2
-                ;;
-            --no-resolution-helper)
-                ENABLE_RESOLUTION_HELPER=0
-                shift
-                ;;
-            --force-unsupported-kernel)
-                FORCE_UNSUPPORTED_KERNEL=1
-                shift
-                ;;
-            --keep-download)
-                KEEP_DOWNLOAD=1
-                shift
-                ;;
-            -h|--help)
-                usage
-                exit 0
-                ;;
-            *)
-                die "Unknown option: $1"
-                ;;
-        esac
-    done
-}
-
-version_to_int() {
-    local major minor
-    major="${1%%.*}"
-    minor="${1#*.}"
-    minor="${minor%%.*}"
-    printf '%d\n' "$((10#$major * 1000 + 10#$minor))"
-}
-
-check_platform() {
-    local arch model os_id kernel_mm kernel_int
-    arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-    case "$arch" in
-        arm64|aarch64) ;;
-        *) die "This package is for 64-bit ARM only. Detected architecture: $arch" ;;
-    esac
-
-    if [[ -r /proc/device-tree/model ]]; then
-        model="$(tr -d '\0' </proc/device-tree/model)"
-    else
-        model=""
-    fi
-    if [[ "$model" != *"Raspberry Pi 4"* && "$model" != *"Raspberry Pi 5"* ]]; then
-        die "This build targets Raspberry Pi 4 or Raspberry Pi 5 hardware. Detected: ${model:-unknown hardware}"
-    fi
-
-    os_id="$(. /etc/os-release 2>/dev/null; printf '%s' "${ID:-unknown}")"
-    case "$os_id" in
-        raspbian|debian) ;;
-        *) warn "Detected OS ID '$os_id'. This project is designed for 64-bit Raspberry Pi OS/Raspbian." ;;
-    esac
-
-    kernel_mm="$(uname -r | grep -oE '^[0-9]+\.[0-9]+' || true)"
-    [[ -n "$kernel_mm" ]] || die "Could not determine the running kernel version."
-    kernel_int="$(version_to_int "$kernel_mm")"
-    if (( kernel_int < 4015 || kernel_int > 6015 )); then
-        if (( FORCE_UNSUPPORTED_KERNEL == 0 )); then
-            die "Kernel $kernel_mm is outside the official DisplayLink 6.3 verified range (4.15-6.15). Re-run with --force-unsupported-kernel only if you accept the risk."
-        fi
-        warn "Continuing on unverified kernel $kernel_mm because --force-unsupported-kernel was supplied."
-    fi
-
-    log "Platform check passed: ${model:-Raspberry Pi 4/5}, architecture $arch, kernel $(uname -r)."
-}
-
-check_for_conflicts() {
-    local conflicts=()
-
-    if [[ -e /opt/displaylink ]]; then
-        conflicts+=("/opt/displaylink")
-    fi
-    for existing_path in \
-        /usr/lib/displaylink \
-        /usr/libexec/displaylink \
-        /usr/share/displaylink \
-        /usr/share/displaylink-driver \
-        /etc/udev/rules.d/99-displaylink.rules \
-        /etc/modprobe.d/evdi.conf \
-        /etc/modules-load.d/evdi.conf \
-        /lib/systemd/system/displaylink-driver.service \
-        /usr/lib/systemd/system/displaylink-driver.service; do
-        if [[ -e "$existing_path" ]]; then
-            conflicts+=("$existing_path")
-        fi
-    done
-    if dpkg-query -W -f='${Status}' displaylink-driver 2>/dev/null | grep -q 'install ok installed'; then
-        conflicts+=("APT package displaylink-driver")
-    fi
-    if systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -Eq '^(displaylink-driver|displaylink|dlm)\.service$'; then
-        conflicts+=("an existing DisplayLink system service")
-    fi
-    if command -v dkms >/dev/null 2>&1 && dkms status 2>/dev/null | grep -qE '^evdi[/, ]'; then
-        conflicts+=("an existing EVDI DKMS module")
-    fi
-    if lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
-        conflicts+=("an already-loaded EVDI kernel module")
-    fi
-    if compgen -G '/usr/src/evdi-*' >/dev/null; then
-        conflicts+=("existing EVDI source under /usr/src")
-    fi
-    if [[ -e "$INSTALL_ROOT" || -e "$STATE_DIR" || -e "$SERVICE_FILE" || -e "$MANAGER_HELPER" ]]; then
-        conflicts+=("an existing installation of this AOC package")
-    fi
-
-    if (( ${#conflicts[@]} > 0 )); then
-        printf '\nConflicting DisplayLink installation detected:\n'
-        printf '  - %s\n' "${conflicts[@]}"
-        cat <<'MSG'
-
-No files were changed. Remove the existing DisplayLink installation using its own
-uninstaller before running this package. This installer will not automatically
-remove or overwrite another driver's files because doing so could alter unrelated
-system behavior.
-MSG
-        exit 2
-    fi
-}
-
-apt_install_minimal() {
-    local packages=(
-        ca-certificates
-        curl
-        unzip
-        dkms
-        build-essential
-        binutils
-        libdrm-dev
-        libusb-1.0-0
-        pkg-config
-        x11-xserver-utils
-        usbutils
-    )
-    local missing=()
-    local pkg
-
-    for pkg in "${packages[@]}"; do
-        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
-            missing+=("$pkg")
-        fi
-    done
-
-    if (( ${#missing[@]} > 0 )); then
-        log "Installing only required packages: ${missing[*]}"
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update
-        apt-get install -y --no-install-recommends "${missing[@]}"
-    else
-        log "Required user-space dependencies are already installed."
-    fi
-}
-
-ensure_kernel_headers() {
-    local kver="$(uname -r)"
-    local candidates=("linux-headers-$kver" raspberrypi-kernel-headers linux-headers-rpi-v8)
-    local pkg
-
-    if [[ -e "/lib/modules/$kver/build/Makefile" ]]; then
-        log "Matching kernel headers are already present for $kver."
-        return
-    fi
-
-    log "Matching kernel headers are missing; searching Raspberry Pi OS packages."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    for pkg in "${candidates[@]}"; do
-        if apt-cache show "$pkg" >/dev/null 2>&1; then
-            log "Trying kernel-header package: $pkg"
-            if apt-get install -y --no-install-recommends "$pkg"; then
-                break
-            fi
-        fi
-    done
-
-    if [[ ! -e "/lib/modules/$kver/build/Makefile" ]]; then
-        die "Headers matching the running kernel $kver are unavailable. No driver files were installed. Update/reboot into the matching Raspberry Pi OS kernel, then run this installer again."
-    fi
-
-    log "Matching kernel headers are available for $kver."
-}
-
-confirm_eula() {
-    if (( ACCEPT_EULA == 1 )); then
-        return
-    fi
-
-    if [[ ! -t 0 ]]; then
-        die "DisplayLink EULA acceptance is required. Re-run with --accept-displaylink-eula after reviewing: $DISPLAYLINK_EULA_URL"
-    fi
-
-    printf '\nThe proprietary DisplayLink user-space driver is governed by the Synaptics EULA:\n%s\n\n' "$DISPLAYLINK_EULA_URL"
-    read -r -p "Type AGREE to confirm that you reviewed and accept the EULA: " answer
-    [[ "$answer" == "AGREE" ]] || die "EULA not accepted; installation cancelled."
-    ACCEPT_EULA=1
-}
-
-obtain_driver_zip() {
-    local destination="$WORK_DIR/displaylink-${DISPLAYLINK_VERSION}.zip"
-
-    # The EULA governs the proprietary user-space payload whether it is
-    # downloaded now or supplied as an already-downloaded official ZIP.
-    confirm_eula
-
-    if [[ -n "$OFFLINE_ZIP" ]]; then
-        [[ -f "$OFFLINE_ZIP" ]] || die "Official driver ZIP not found: $OFFLINE_ZIP"
-        cp -- "$OFFLINE_ZIP" "$destination"
-        log "Using supplied official DisplayLink ZIP: $OFFLINE_ZIP"
-    else
-        log "Downloading the official unmodified DisplayLink $DISPLAYLINK_VERSION ZIP from Synaptics."
-        curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "$destination" "$DISPLAYLINK_ZIP_URL"
-    fi
-
-    unzip -tq "$destination" >/dev/null || die "The downloaded DisplayLink ZIP failed its integrity test."
-
-    if (( KEEP_DOWNLOAD == 1 )); then
-        cp -- "$destination" "$SCRIPT_DIR/DisplayLink-USB-Graphics-Software-for-Ubuntu-${DISPLAYLINK_VERSION}.zip"
-        log "Kept a copy of the official ZIP in the project directory."
-    fi
-
-    DRIVER_ZIP="$destination"
-}
-
-extract_official_payload() {
-    local zip_file="$1"
-    local zip_dir="$WORK_DIR/zip"
-    local payload_dir="$WORK_DIR/payload"
-    local run_file extracted_root
-
-    mkdir -p "$zip_dir" "$payload_dir"
-    unzip -q "$zip_file" -d "$zip_dir"
-    run_file="$(find "$zip_dir" -type f -name 'displaylink-driver-6.3*.run' -print -quit)"
-    [[ -n "$run_file" ]] || die "The ZIP did not contain the expected official DisplayLink 6.3 .run installer."
-    chmod +x "$run_file"
-
-    log "Extracting official driver components without executing the Ubuntu installer."
-    (
-        cd "$payload_dir"
-        "$run_file" --noexec --keep --target "$(basename "${run_file%.run}")" >/dev/null
-    )
-
-    extracted_root="$(find "$payload_dir" -mindepth 1 -maxdepth 2 -type f -name DisplayLinkManager -printf '%h\n' | grep -E '/(aarch64|arm64)[^/]*/?$' | head -n1 || true)"
-    if [[ -z "$extracted_root" ]]; then
-        extracted_root="$(find "$payload_dir" -type f -name DisplayLinkManager -path '*aarch64*' -printf '%h\n' | head -n1 || true)"
-    fi
-    [[ -n "$extracted_root" ]] || die "No aarch64 DisplayLinkManager binary was found in the official payload."
-
-    PAYLOAD_DIR="$payload_dir"
-}
-
-install_evdi_dkms() {
-    local payload_dir="$1"
-    local evdi_archive evdi_extract dkms_conf module_src package_name evdi_root
-
-    evdi_archive="$(find "$payload_dir" -type f \( -iname 'evdi*src*.tar.gz' -o -iname 'evdi*.tar.gz' \) -print -quit)"
-    [[ -n "$evdi_archive" ]] || die "No EVDI source archive was found in the official payload."
-
-    evdi_extract="$WORK_DIR/evdi-source"
-    mkdir -p "$evdi_extract"
-    tar -xzf "$evdi_archive" -C "$evdi_extract"
-
-    dkms_conf="$(find "$evdi_extract" -type f -name dkms.conf -print -quit)"
-    [[ -n "$dkms_conf" ]] || die "The EVDI source did not contain dkms.conf."
-
-    EVDI_VERSION="$(sed -nE 's/^[[:space:]]*PACKAGE_VERSION=["'"']?([^"'"'[:space:]]+).*/\1/p' "$dkms_conf" | head -n1)"
-    package_name="$(sed -nE 's/^[[:space:]]*PACKAGE_NAME=["'"']?([^"'"'[:space:]]+).*/\1/p' "$dkms_conf" | head -n1)"
-    [[ -n "$EVDI_VERSION" ]] || die "Could not determine the bundled EVDI version."
-    [[ "$package_name" == "evdi" ]] || die "Unexpected DKMS package name: ${package_name:-unknown}"
-
-    if dkms status 2>/dev/null | grep -qE '^evdi[/, ]'; then
-        die "An EVDI DKMS module is already installed. This installer will not overwrite it."
-    fi
-
-    module_src="$(dirname "$dkms_conf")"
-    evdi_root="$(dirname "$module_src")"
-    if [[ ! -f "$evdi_root/library/Makefile" ]]; then
-        evdi_root="$(find "$evdi_extract" -type f -path '*/library/Makefile' -printf '%h\n' -quit | xargs -r dirname)"
-    fi
-    [[ -n "$evdi_root" && -f "$evdi_root/library/Makefile" ]] || die "The EVDI source did not contain the libevdi build files."
-    EVDI_SOURCE_ROOT="$evdi_root"
-
-    mkdir -p "/usr/src/evdi-$EVDI_VERSION"
-    cp -a "$module_src"/. "/usr/src/evdi-$EVDI_VERSION/"
-    printf '%s\n' "$PROJECT_NAME $PROJECT_VERSION" > "/usr/src/evdi-$EVDI_VERSION/.aoc-i1659fwux-owned"
-
-    log "Building EVDI $EVDI_VERSION for kernel $(uname -r) with DKMS."
-    dkms add -m evdi -v "$EVDI_VERSION"
-    dkms build -m evdi -v "$EVDI_VERSION" -k "$(uname -r)"
-    dkms install -m evdi -v "$EVDI_VERSION" -k "$(uname -r)"
-
-    modinfo evdi >/dev/null 2>&1 || die "EVDI installed but modinfo could not find the module."
-}
-
-install_displaylink_userspace() {
-    local payload_dir="$1"
-    local manager manager_dir file dependency_report
-
-    manager="$(find "$payload_dir" -type f -name DisplayLinkManager -path '*aarch64*' -print -quit)"
-    [[ -n "$manager" ]] || die "No aarch64 DisplayLinkManager binary was found."
-    manager_dir="$(dirname "$manager")"
-
-    if ! readelf -h "$manager" 2>/dev/null | grep -qE 'Machine:[[:space:]]+AArch64'; then
-        die "The selected DisplayLinkManager is not an AArch64 executable."
-    fi
-
-    mkdir -p "$INSTALL_ROOT"
-    install -m 0755 "$manager" "$INSTALL_ROOT/DisplayLinkManager"
-
-    # Build the userspace library from the exact EVDI source bundled with the
-    # official driver. This keeps the kernel module and libevdi ABI matched.
-    log "Building libevdi $EVDI_VERSION from the official bundled source."
-    make -C "$EVDI_SOURCE_ROOT/library" clean >/dev/null
-    make -C "$EVDI_SOURCE_ROOT/library"
-    while IFS= read -r -d '' file; do
-        cp -a "$file" "$INSTALL_ROOT/"
-    done < <(find "$EVDI_SOURCE_ROOT/library" -maxdepth 1 \( -type f -o -type l \) -name 'libevdi.so*' -print0)
-    compgen -G "$INSTALL_ROOT/libevdi.so*" >/dev/null || die "libevdi built but no library files were produced."
-
-    # Use Raspberry Pi OS's maintained libusb runtime instead of installing the
-    # bundled Ubuntu copy. Copy only any other architecture-local libraries.
-    while IFS= read -r -d '' file; do
-        case "$(basename "$file")" in
-            libevdi.so*|libusb-1.0.so*) continue ;;
-        esac
-        cp -a "$file" "$INSTALL_ROOT/"
-    done < <(find "$manager_dir" -maxdepth 1 \( -type f -o -type l \) \( -name '*.so' -o -name '*.so.*' \) -print0)
-
-    while IFS= read -r -d '' file; do
-        cp -a "$file" "$INSTALL_ROOT/"
-    done < <(find "$payload_dir" -type f -name '*.spkg' -print0)
-    compgen -G "$INSTALL_ROOT/*.spkg" >/dev/null || die "No DisplayLink firmware package was found in the official payload."
-
-    file="$(find "$payload_dir" -type f -iname 'LICENSE*' -print -quit || true)"
-    if [[ -n "$file" ]]; then
-        cp -a "$file" "$INSTALL_ROOT/DisplayLink-LICENSE"
-    fi
-
-    chmod 0755 "$INSTALL_ROOT/DisplayLinkManager"
-
-    dependency_report="$(LD_LIBRARY_PATH="$INSTALL_ROOT" ldd "$INSTALL_ROOT/DisplayLinkManager" 2>&1 || true)"
-    if grep -q 'not found' <<<"$dependency_report"; then
-        printf '%s\n' "$dependency_report" | tee -a "$LOG_FILE"
-        die "DisplayLinkManager has unresolved runtime-library dependencies."
-    fi
-
-    log "Installed the official unmodified aarch64 DisplayLink manager, matched libevdi, and firmware under $INSTALL_ROOT."
-}
-
-write_driver_configuration() {
-    local module pre_list="" usb_device
-    local -a pre_modules=()
-
-    cat > "$MODPROBE_FILE" <<'CONF'
-# Added by the AOC I1659FWUX Raspberry Pi 4/5 DisplayLink package.
-# One virtual device is sufficient for this single-monitor package.
-options evdi initial_device_count=1
-CONF
-
-    # Order only DRM modules that actually exist on this system ahead of EVDI.
-    # This avoids introducing a dependency on a Raspberry Pi graphics module
-    # that the user's current boot/display configuration does not use.
-    for module in drm_kms_helper vc4; do
-        if modinfo "$module" >/dev/null 2>&1; then
-            pre_modules+=("$module")
-        fi
-    done
-    if (( ${#pre_modules[@]} > 0 )); then
-        printf -v pre_list '%s ' "${pre_modules[@]}"
-        pre_list="${pre_list% }"
-        printf 'softdep evdi pre: %s\n' "$pre_list" >> "$MODPROBE_FILE"
-    fi
-
-    printf 'evdi\n' > "$MODULES_LOAD_FILE"
-
-    cat > "$UDEV_RULE_FILE" <<'RULE'
-# AOC I1659FWUX (DisplayLink USB ID 17e9:ff10): prevent USB autosuspend only for this monitor.
-ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="17e9", ATTR{idProduct}=="ff10", TEST=="power/control", ATTR{power/control}="on"
-RULE
-
-    cat > "$SERVICE_FILE" <<EOF_SERVICE
-[Unit]
-Description=AOC I1659FWUX DisplayLink Manager
-Documentation=$DISPLAYLINK_EULA_URL
-After=systemd-modules-load.service
-Wants=systemd-modules-load.service
-ConditionPathExists=$INSTALL_ROOT/DisplayLinkManager
-
-[Service]
-Type=simple
-WorkingDirectory=$INSTALL_ROOT
-Environment=LD_LIBRARY_PATH=$INSTALL_ROOT
-ExecStartPre=/sbin/modprobe evdi
-ExecStart=$INSTALL_ROOT/DisplayLinkManager
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF_SERVICE
-
-    systemctl daemon-reload
-    udevadm control --reload-rules
-
-    # Apply the same exact-device power setting immediately when the monitor is
-    # already connected; no other USB device is touched.
-    for usb_device in /sys/bus/usb/devices/*; do
-        [[ -r "$usb_device/idVendor" && -r "$usb_device/idProduct" ]] || continue
-        [[ "$(cat "$usb_device/idVendor")" == "17e9" ]] || continue
-        [[ "$(cat "$usb_device/idProduct")" == "ff10" ]] || continue
-        [[ -w "$usb_device/power/control" ]] && printf 'on\n' > "$usb_device/power/control"
-    done
-
-    log "Added only monitor-specific module, USB, and service configuration."
-}
-
-install_helpers() {
-    umask 022
-    write_diagnostics_payload > "$DIAGNOSTICS_HELPER"
-    chmod 0755 "$DIAGNOSTICS_HELPER"
-
-    if (( ENABLE_RESOLUTION_HELPER == 1 )); then
-        write_resolution_payload > "$RESOLUTION_HELPER"
-        chmod 0755 "$RESOLUTION_HELPER"
-        mkdir -p "$(dirname "$AUTOSTART_FILE")"
-        cat > "$AUTOSTART_FILE" <<'DESKTOP'
-[Desktop Entry]
-Type=Application
-Name=AOC I1659FWUX Resolution Check
-Comment=Correct only the AOC DisplayLink output to 1920x1080 when needed
-Exec=/usr/local/bin/aoc-i1659fwux-resolution --quiet --wait 30
-Terminal=false
-NoDisplay=true
-X-GNOME-Autostart-enabled=true
-DESKTOP
-        log "Installed a post-login resolution helper limited to the EVDI output for USB device $AOC_USB_ID."
-    else
-        log "Resolution helper was disabled by request."
-    fi
-}
-
-write_state() {
-    local source_sha
-    mkdir -p "$STATE_DIR"
-    source_sha="$(sha256sum "$SCRIPT_PATH" | awk '{print $1}')"
-    cat > "$STATE_DIR/install-state" <<EOF_STATE
-PROJECT_VERSION=$PROJECT_VERSION
-DISPLAYLINK_VERSION=$DISPLAYLINK_VERSION
-EVDI_VERSION=$EVDI_VERSION
-KERNEL_VERSION=$(uname -r)
-RESOLUTION_HELPER=$ENABLE_RESOLUTION_HELPER
-INSTALLER_SHA256=$source_sha
-INSTALLED_AT=$(date --iso-8601=seconds)
-EOF_STATE
-
-    install -m 0755 "$SCRIPT_PATH" "$STATE_DIR/aoc-i1659fwux-driver.sh"
-    install -m 0755 "$SCRIPT_PATH" "$MANAGER_HELPER"
-}
-
-start_driver() {
-    systemctl enable aoc-i1659fwux-displaylink.service
-    modprobe -r evdi 2>/dev/null || true
-    modprobe evdi
-    systemctl restart aoc-i1659fwux-displaylink.service
-
-    sleep 2
-    if systemctl is-active --quiet aoc-i1659fwux-displaylink.service; then
-        log "DisplayLink service is active."
-    else
-        systemctl --no-pager --full status aoc-i1659fwux-displaylink.service | tee -a "$LOG_FILE" || true
-        die "The DisplayLink service did not start. Run aoc-i1659fwux-diagnostics and review the generated report."
-    fi
-}
-
-rollback_install() {
-    local status="${1:-1}"
-    if (( status == 0 || INSTALL_STARTED == 0 )); then
-        exit "$status"
-    fi
-
-    trap - ERR
-    set +e
-    printf '\nInstallation failed. Rolling back files created by this run...\n' | tee -a "$LOG_FILE"
-    systemctl disable --now aoc-i1659fwux-displaylink.service >/dev/null 2>&1
-    rm -f "$SERVICE_FILE" "$MODPROBE_FILE" "$MODULES_LOAD_FILE" "$UDEV_RULE_FILE" "$RESOLUTION_HELPER" "$DIAGNOSTICS_HELPER" "$AUTOSTART_FILE" "$MANAGER_HELPER"
-    rm -rf "$INSTALL_ROOT" "$STATE_DIR"
-    if [[ -n "$EVDI_VERSION" ]]; then
-        dkms remove -m evdi -v "$EVDI_VERSION" --all >/dev/null 2>&1
-        if [[ -f "/usr/src/evdi-$EVDI_VERSION/.aoc-i1659fwux-owned" ]]; then
-            rm -rf "/usr/src/evdi-$EVDI_VERSION"
-        fi
-    fi
-    systemctl daemon-reload >/dev/null 2>&1
-    udevadm control --reload-rules >/dev/null 2>&1
-    printf 'Rollback completed. Required APT packages were intentionally left installed.\n' | tee -a "$LOG_FILE"
-    exit "$status"
-}
-
-install_main() {
-    parse_args "$@"
-    require_root
-
-    log "Checking platform and existing driver state for $PROJECT_NAME v$PROJECT_VERSION."
-    check_platform
-    check_for_conflicts
-    confirm_eula
-
-    touch "$LOG_FILE"
-    chmod 0644 "$LOG_FILE"
-    LOG_ACTIVE=1
-    trap 'rollback_install $?' ERR
-    log "Preflight checks passed; beginning installation."
-
-    apt_install_minimal
-    ensure_kernel_headers
-
-    WORK_DIR="$(mktemp -d /tmp/aoc-i1659fwux-install.XXXXXX)"
-    trap 'rm -rf "$WORK_DIR"' EXIT
-
-    obtain_driver_zip
-    extract_official_payload "$DRIVER_ZIP"
-
-    INSTALL_STARTED=1
-    install_evdi_dkms "$PAYLOAD_DIR"
-    install_displaylink_userspace "$PAYLOAD_DIR"
-    write_driver_configuration
-    install_helpers
-    write_state
-    start_driver
-
-    trap - ERR
-    rm -rf "$WORK_DIR"
-    trap - EXIT
-
-    cat <<EOF_DONE
-
-Installation completed successfully.
-
-Installed:
-  - Official DisplayLink $DISPLAYLINK_VERSION aarch64 manager
-  - EVDI $EVDI_VERSION DKMS module and matching locally built libevdi
-  - AOC I1659FWUX USB rule for device $AOC_USB_ID
-  - A monitor-specific service and diagnostics command
-  - 1920x1080 post-login correction helper: $([[ $ENABLE_RESOLUTION_HELPER -eq 1 ]] && echo enabled || echo disabled)
-
-Not changed:
-  - Login manager, autologin, PAM, greeter, or login-screen configuration
-  - Wayland/X11 session selection
-  - Xorg configuration
-  - HDMI, boot display, desktop layout, primary-display, rotation, or mirroring settings
-
-Connect the monitor directly to a Raspberry Pi 4 or Raspberry Pi 5 USB 3 port, then log out and back in
-or reboot when convenient. The installer does not reboot automatically.
-
-Diagnostics command:
-  aoc-i1659fwux-diagnostics
-
-Uninstall command:
-  sudo $MANAGER_HELPER --uninstall
-EOF_DONE
-    log "Installation finished successfully."
-}
-
-
-run_temp_payload() {
-    local writer="$1"
-    shift
-    local tmp status
-    tmp="$(mktemp /tmp/aoc-i1659fwux-mode.XXXXXX)"
-    "$writer" > "$tmp"
-    chmod 0755 "$tmp"
-    set +e
-    "$tmp" "$@"
-    status=$?
-    set -e
-    rm -f -- "$tmp"
-    return "$status"
-}
-
-validate_self() {
-    local failed=0 source="$SCRIPT_PATH" source_sha scan_file
-    pass() { printf '[PASS] %s\n' "$*"; }
-    fail() { printf '[FAIL] %s\n' "$*" >&2; failed=1; }
-
-    [[ -f "$source" ]] && pass "Single installer file is present: $(basename "$source")" || fail "Installer file is missing."
-    [[ -x "$source" ]] && pass "Installer is executable." || fail "Installer is not executable."
-
-    if bash -n "$source"; then
-        pass "Bash syntax is valid."
-    else
-        fail "Bash syntax validation failed."
-    fi
-
-    source_sha="$(sha256sum "$source" | awk '{print $1}')"
-    pass "Installer SHA-256: $source_sha"
-
-    scan_file="$(mktemp /tmp/aoc-i1659fwux-validation.XXXXXX)"
-    awk '
-        /^validate_self\(\) \{/ {skip=1}
-        /^run_preflight\(\) \{/ {skip=0}
-        !skip {print}
-    ' "$source" > "$scan_file"
-
-    local forbidden_write
-    forbidden_write='(install|cp|mv|rm|ln|tee|sed[[:space:]]+-i|cat[[:space:]]+>)[^#\n]*(/etc/(lightdm|gdm|sddm|pam\.d|X11)|/boot|config\.txt|cmdline\.txt)'
-    if grep -En "$forbidden_write" "$scan_file"; then
-        fail "A forbidden login, Xorg, PAM, or boot write target was found."
-    else
-        pass "No forbidden login, Xorg, PAM, or boot write target."
-    fi
-
-    if grep -En 'apt-get[[:space:]]+(dist-upgrade|full-upgrade|upgrade)|rpi-update|raspi-config' "$scan_file"; then
-        fail "A system upgrade or global Raspberry Pi configuration command was found."
-    else
-        pass "No system upgrade or global Raspberry Pi configuration command."
-    fi
-
-    if grep -En 'xrandr[^\n]*(--primary|--pos|--left-of|--right-of|--above|--below|--rotate|--reflect|--same-as)' "$scan_file"; then
-        fail "The resolution code contains a layout, primary, rotation, or mirroring operation."
-    else
-        pass "Resolution code is limited to mode selection on the identified EVDI output."
-    fi
-
-    if grep -En '/etc/xdg/autostart/aoc-i1659fwux-resolution\.desktop|/etc/systemd/system/aoc-i1659fwux-displaylink\.service|/etc/modprobe\.d/aoc-i1659fwux-evdi\.conf|/etc/modules-load\.d/aoc-i1659fwux-evdi\.conf|/etc/udev/rules\.d/85-aoc-i1659fwux-displaylink\.rules' "$scan_file" >/dev/null; then
-        pass "Expected monitor-specific system file paths are present."
-    else
-        fail "Expected monitor-specific system file paths are missing."
-    fi
-
-    rm -f -- "$scan_file"
-
-    if (( failed != 0 )); then
-        printf '\nSingle-file package validation failed.\n' >&2
-        return 1
-    fi
-    printf '\nSingle-file package validation passed.\n'
-}
-
-run_preflight() {
-    run_temp_payload write_preflight_payload "$@"
-}
-
-run_diagnostics() {
-    run_temp_payload write_diagnostics_payload "$@"
-}
-
-run_resolution() {
-    run_temp_payload write_resolution_payload "$@"
-}
-
-uninstall_driver() {
-    local state_file="$STATE_DIR/install-state" evdi_version=""
-    require_root
-
-    if [[ -r "$state_file" ]]; then
-        evdi_version="$(sed -n 's/^EVDI_VERSION=//p' "$state_file" | head -n1)"
-    fi
-
-    log "Removing only files owned by $PROJECT_NAME."
-    systemctl disable --now aoc-i1659fwux-displaylink.service >/dev/null 2>&1 || true
-    rm -f -- "$SERVICE_FILE"
-    systemctl daemon-reload
-
-    rm -f -- \
-        "$MODPROBE_FILE" \
-        "$MODULES_LOAD_FILE" \
-        "$UDEV_RULE_FILE" \
-        "$RESOLUTION_HELPER" \
-        "$DIAGNOSTICS_HELPER" \
-        "$AUTOSTART_FILE"
-    udevadm control --reload-rules >/dev/null 2>&1 || true
-
-    if [[ -n "$evdi_version" ]]; then
-        if [[ -f "/usr/src/evdi-$evdi_version/.aoc-i1659fwux-owned" ]]; then
-            log "Removing package-owned EVDI $evdi_version DKMS module."
-            dkms remove -m evdi -v "$evdi_version" --all >/dev/null 2>&1 || true
-            rm -rf -- "/usr/src/evdi-$evdi_version"
-        else
-            log "EVDI source ownership marker is absent; leaving EVDI files untouched."
-        fi
-    else
-        log "No recorded EVDI version was found; leaving any EVDI installation untouched."
-    fi
-
-    rm -rf -- "$INSTALL_ROOT"
-    rm -f -- "$LOG_FILE"
-
-    if lsmod 2>/dev/null | awk '{print $1}' | grep -qx evdi; then
-        modprobe -r evdi >/dev/null 2>&1 || log "EVDI is still in use and will unload at the next reboot."
-    fi
-
-    # Remove the installed manager copy last. Removing the currently executing
-    # file is safe on Linux; the process already has it open.
-    rm -f -- "$MANAGER_HELPER"
-    rm -rf -- "$STATE_DIR"
-
-    cat <<'DONE'
-
-Uninstall/rollback completed.
-
-Only this package's dedicated files and ownership-marked EVDI source were removed.
-Shared APT packages were left installed because other software may use them.
-Login, desktop-session, HDMI, boot, and unrelated display settings were not altered.
-No automatic reboot was performed.
-DONE
-}
-
-dispatch() {
-    case "${1:-}" in
-        --validate)
-            shift
-            [[ $# -eq 0 ]] || die "--validate does not accept additional arguments."
-            validate_self
-            ;;
-        --preflight)
-            shift
-            run_preflight "$@"
-            ;;
-        --diagnostics)
-            shift
-            run_diagnostics "$@"
-            ;;
-        --resolution)
-            shift
-            run_resolution "$@"
-            ;;
-        --uninstall|--rollback)
-            shift
-            [[ $# -eq 0 ]] || die "Uninstall/rollback does not accept additional arguments."
-            uninstall_driver
-            ;;
-        -h|--help)
-            usage
-            ;;
-        *)
-            install_main "$@"
-            ;;
-    esac
-}
-
-dispatch "$@"
+[[ ${EUID} -eq 0 ]] || die "Run through sudo: curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash"
+for command_name in base64 sha256sum tar mktemp; do
+  command -v "$command_name" >/dev/null 2>&1 || die "The $command_name command is required."
+done
+
+TEMP_DIR="$(mktemp -d -t aoc-i1659fwux-remote.XXXXXXXX)"
+trap cleanup EXIT INT TERM
+PAYLOAD_FILE="${TEMP_DIR}/package.tar.gz"
+
+log "Reconstructing the embedded driver package in a temporary directory."
+base64 --decode > "${PAYLOAD_FILE}" <<'AOC_DRIVER_PAYLOAD'
+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
+AOC_DRIVER_PAYLOAD
+
+actual_size="$(stat -c '%s' "${PAYLOAD_FILE}")"
+[[ "${actual_size}" == "${PAYLOAD_SIZE}" ]] || die "Embedded package size verification failed."
+actual_sha256="$(sha256sum "${PAYLOAD_FILE}" | awk '{print $1}')"
+[[ "${actual_sha256}" == "${PAYLOAD_SHA256}" ]] || die "Embedded package SHA-256 verification failed."
+log "Embedded package verification passed: ${actual_sha256}"
+
+tar -xzf "${PAYLOAD_FILE}" -C "${TEMP_DIR}"
+PROJECT_DIR="${TEMP_DIR}/${PACKAGE_NAME}"
+for required in install.sh uninstall.sh status.sh repair-login.sh session-broker.sh session-request.sh; do
+  [[ -x "${PROJECT_DIR}/${required}" ]] || die "Embedded $required is missing or not executable."
+done
+
+STATE_DIR="/var/lib/aoc-i1659fwux-rpi-displaylink"
+LEGACY_UNIT="/etc/systemd/system/aoc-i1659fwux-displaylink.service"
+LEGACY_MODULE_LOAD="/etc/modules-load.d/aoc-i1659fwux-evdi.conf"
+LEGACY_MODPROBE="/etc/modprobe.d/evdi.conf"
+legacy=0
+[[ -e "$LEGACY_MODULE_LOAD" ]] && legacy=1
+if [[ -f "$LEGACY_UNIT" ]] && grep -Fq 'ExecStart=/opt/displaylink/DisplayLinkManager' "$LEGACY_UNIT"; then
+  legacy=1
+fi
+if [[ -f "$LEGACY_MODPROBE" ]] && grep -Fq 'AOC I1659FWUX' "$LEGACY_MODPROBE"     && grep -Fq 'initial_device_count=1' "$LEGACY_MODPROBE"; then
+  legacy=1
+fi
+if [[ -d "$STATE_DIR" && ! -f "$STATE_DIR/install-info" ]]; then
+  legacy=1
+fi
+
+if (( legacy == 1 )); then
+  log "Detected the earlier pre-login EVDI revision that can cause a LightDM login loop."
+  "${PROJECT_DIR}/repair-login.sh"
+  log "Repair completed. Reboot the Raspberry Pi now."
+  log "After reboot, run this same remote installation command again."
+  exit 20
+fi
+
+if [[ -r "$STATE_DIR/install-info" ]]; then
+  if grep -Fqx 'startup=post-login-xdg-autostart-root-broker' "$STATE_DIR/install-info"; then
+    die "The corrected post-login driver is already installed. Uninstall it before reinstalling."
+  fi
+  die "An existing package installation was detected. Run repair-login.sh and reboot before installing this revision."
+fi
+
+log "Running the no-change safety and compatibility check first."
+"${PROJECT_DIR}/install.sh" --check-only
+printf '\n'
+log "Safety check passed. Beginning the normal installation."
+log "EVDI and DisplayLinkManager will remain inactive at LightDM and start only after an authenticated desktop request."
+"${PROJECT_DIR}/install.sh" "$@"
+log "Installation completed. Reboot normally to use the post-login startup path."

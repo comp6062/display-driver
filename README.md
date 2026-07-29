@@ -1,61 +1,64 @@
-# AOC I1659FWUX Driver for Raspberry Pi 4/5 (ARM64)
+# AOC I1659FWUX DisplayLink driver for Raspberry Pi OS ARM64
 
-This package is a deliberately narrow installer for the **AOC I1659FWUX USB
-monitor** on a **Raspberry Pi 4 or Raspberry Pi 5** running 64-bit Raspberry Pi
-OS/Raspbian (`aarch64`).
+This repository installs the official Synaptics DisplayLink 6.3 AArch64 runtime
+and its bundled EVDI source for an AOC I1659FWUX (`17e9:ff10`) on a Raspberry
+Pi 4 or Raspberry Pi 5 running Raspberry Pi OS/Raspbian ARM64.
 
-It uses the official Synaptics DisplayLink Ubuntu 6.3 archive, but it does
-**not** execute Synaptics' generic system installer. Instead, it extracts only:
+The package does **not** execute Synaptics' general-purpose installer. It
+extracts only the AArch64 runtime, builds the matching EVDI kernel module and
+`libevdi`, and installs an AOC-specific service and udev rule.
 
-- the AArch64 `DisplayLinkManager` runtime and its matching libraries/firmware;
-- the bundled EVDI source, which it builds for the running Raspberry Pi kernel
-  through DKMS.
+## Important login-safety design
 
-That design keeps the change boundary small and avoids the display-manager,
-TTY, X11/Wayland, and login changes that can be introduced by broad third-party
-DisplayLink installation scripts.
+Earlier repository revisions loaded EVDI before LightDM and ran
+`DisplayLinkManager` at `graphical.target`. That made the USB monitor available
+at the greeter, but it could also cause the authenticated desktop session to
+terminate immediately and return to the login screen. That looks like an
+incorrect password, but the password is normally accepted and the desktop
+session is what failed.
 
-## Validation status
+Version 0.2.2 removes that startup design completely:
 
-The bundle has been statically reviewed and its Bash scripts pass syntax and
-safety-pattern checks. It has **not** been run against every Raspberry Pi OS,
-kernel, compositor, and physical I1659FWUX combination. Treat version 0.2.1 as
-an engineering-validation package until it passes the hardware checklist below
-on your own Pi.
+- no EVDI entry is added to `/etc/modules-load.d`;
+- no `initial_device_count=1` option is added to `/etc/modprobe.d/evdi.conf`;
+- EVDI and `DisplayLinkManager` remain inactive at LightDM;
+- an XDG desktop autostart requester waits 25 seconds after an authenticated
+  desktop begins;
+- a root broker verifies the request for another 10 seconds, then loads EVDI
+  with `initial_device_count=0` and starts `DisplayLinkManager`;
+- the broker stops the manager and unloads EVDI when that desktop session ends;
+- if the desktop disappears within 60 seconds after driver startup, the driver
+  is blocked for the remainder of that boot instead of repeatedly causing a
+  login loop.
 
-The installer is fail-closed: it validates the platform, archive, CPU
-architecture, kernel headers, DKMS result, and runtime library dependencies. If
-an installation step fails, it removes the partial driver and restores the
-protected system paths it snapshotted.
+The AOC monitor is therefore intentionally blank during boot and at the login
+screen. It should appear about 35 seconds after the normal desktop has started.
 
-## Exact intended result
+## Behaviour that is preserved
 
-The Raspberry Pi should retain its existing:
+The installer does not intentionally change:
 
-- login or autologin behaviour;
-- password and authentication configuration;
-- SSH configuration;
-- boot target and boot configuration;
-- Wayland/X11 choice and compositor;
-- desktop/session configuration;
-- primary-display layout and resolution settings;
-- network configuration.
+- LightDM, autologin, passwords, PAM, users or authentication;
+- SSH, sudo or networking;
+- the systemd default boot target or gettys;
+- Wayland/X11 selection, labwc, Wayfire, LXDE or Xorg configuration;
+- Raspberry Pi boot configuration;
+- primary-display selection, scaling, rotation or placement;
+- HDMI configuration or unrelated device settings.
 
-The only intended functional difference is that the AOC USB monitor gains the
-DisplayLink/EVDI software required to operate.
+The one added desktop-session object is the display-specific XDG autostart
+requester required to start the driver only after authentication.
 
-## Files and system objects added
-
-The installer may add only the following driver-specific objects, plus required
-Debian packages:
+## Files added
 
 ```text
 /opt/displaylink/
+/opt/displaylink/aoc-session-broker.sh
+/opt/displaylink/aoc-session-request.sh
 /usr/src/evdi-<version>/
 /var/lib/dkms/evdi/<version>/
 /lib/modules/<kernel>/updates/dkms/evdi.ko*
-/etc/modprobe.d/evdi.conf
-/etc/modules-load.d/aoc-i1659fwux-evdi.conf
+/etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop
 /etc/udev/rules.d/99-aoc-i1659fwux-displaylink.rules
 /etc/systemd/system/aoc-i1659fwux-displaylink.service
 /etc/systemd/system/graphical.target.wants/aoc-i1659fwux-displaylink.service
@@ -63,222 +66,106 @@ Debian packages:
 /var/log/aoc-i1659fwux-rpi-displaylink/
 ```
 
-The exact-device udev rule matches USB ID `17e9:ff10`; it does not start the
-service from USB hotplug and does not install generic DisplayLink networking
-rules. The isolated service is enabled only for the normal graphical target and
-contains no `getty`, login-manager, or TTY conflict. DKMS also updates normal
-kernel-module dependency metadata and may refresh an existing initramfs when the
-system's own DKMS policy requires it; it does not change boot configuration.
+The system service is only a request broker. Starting that service does not load
+EVDI or start `DisplayLinkManager`.
 
-## Explicitly prohibited changes
+## Repair a Pi already stuck in the login loop
 
-The installer does **not**:
+Update the GitHub repository with this corrected bundle, then run the repair
+from SSH or a text console such as `Ctrl`+`Alt`+`F2`:
 
-- enable, disable, or reconfigure autologin;
-- edit LightDM, GDM, SDDM, PAM, passwords, users, sudo, SSH, or systemd-logind;
-- switch Wayland to X11 or X11 to Wayland;
-- edit labwc, Wayfire, LXDE, or per-user desktop configuration;
-- change `default.target`, disable a getty, or reserve `tty7`;
-- edit `/boot/config.txt` or `/boot/firmware/config.txt`;
-- install an Xorg configuration or force a display layout;
-- blacklist `udl` or `udlfb` globally;
-- change networking, USB power, or unrelated device rules;
-- reboot automatically.
-
-Before making driver changes, the installer snapshots protected login,
-authentication, boot, X11, and desktop-session paths. It compares them before
-reporting success and restores them if they changed.
-
-See `docs/SIDE_EFFECT_BOUNDARY.md` for the complete boundary.
-
-## Native resolution
-
-The I1659FWUX panel's native mode is **1920 × 1080**. The package does not force
-that resolution globally. It checks whether the EVDI DRM connector exposes the
-native mode supplied by the monitor. Display placement, rotation, scaling, and
-which screen is primary remain under the existing Raspberry Pi OS display
-settings.
-
-The package installs the kernel and user-space driver without changing the
-current Wayland/X11 session. Whether a particular Raspberry Pi OS compositor
-claims and presents the new EVDI connector must still be confirmed on the
-physical Pi. If it does not, `status.sh` reports that condition rather than
-silently switching sessions, restarting the display manager, or changing login
-behaviour.
-
-## Conservative compatibility target
-
-- Raspberry Pi 4 or Raspberry Pi 5;
-- `aarch64` kernel and userland;
-- Raspberry Pi OS/Raspbian or its Debian base;
-- systemd and a graphical desktop;
-- Linux 4.15 through 6.15 by default;
-- matching headers for the currently running kernel.
-
-A kernel outside the conservative range is rejected unless the explicit
-`--force-unsupported-kernel` testing option is used. This does not guarantee
-that an unsupported kernel will work.
-
-## Proprietary archive and EULA
-
-The proprietary Synaptics binary is not redistributed inside this ZIP. During
-installation, the script displays the Synaptics EULA page and requires the user
-to type `AGREE` before any system changes occur. It then downloads the official
-6.3 archive directly from Synaptics.
-
-For an offline installation, place an unmodified copy at exactly:
-
-```text
-vendor/DisplayLink-USB-Graphics-Software-for-Ubuntu-6.3.zip
+```bash
+curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/repair-login.sh | sudo bash
+sudo reboot
 ```
 
-The installer checks that the ZIP is valid, verifies the pinned SHA-256 for
-Synaptics build 6.3.0-48, and dynamically identifies the AArch64 binary. It will
-stop and roll back if the archive checksum, layout, or contents are incompatible
-with the package's expectations.
+The repair removes the old pre-login driver startup and the package's EVDI
+installation. It does not edit LightDM, the password, autologin or PAM. After
+the reboot, confirm that the original desktop/autologin behaviour is restored.
 
-The official runtime contains device firmware. If the connected monitor needs a
-firmware update, DisplayLinkManager may apply it automatically; the screen can
-take several extra seconds to appear on the first connection afterward.
+Then install the corrected package:
 
-## One-command remote installation
+```bash
+curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
+sudo reboot
+```
 
-The included `remote-install.sh` is a self-contained, publish-ready installer.
-Only that one file needs to be placed at a raw HTTPS URL, such as a GitHub raw
-file or release asset. It contains a checksummed copy of this package.
-
-The remote flow is fixed in this order:
-
-1. unpack the embedded package into a temporary directory;
-2. verify the embedded payload SHA-256;
-3. run `install.sh --check-only` without changing the system;
-4. stop immediately if any safety check fails;
-5. run the normal interactive installation only after the check passes.
-
-Use either one-line form from the `comp6062/display-driver` repository:
+## One-command installation
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
 ```
 
+or:
+
 ```bash
 wget -qO- https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
 ```
 
-The Synaptics EULA prompt reads directly from the terminal, so it remains
-interactive even though the installer script itself arrives through a pipe.
-The remote wrapper creates only temporary files before the safety check and
-removes them when it exits.
+The remote script verifies its embedded package, runs the no-change safety
+check first, and starts installation only if that check passes. The Synaptics
+EULA prompt remains interactive through `/dev/tty`.
 
-The same wrapper can be tested locally before publishing:
-
-```bash
-sudo ./remote-install.sh
-```
-
-## Before installation
-
-Remove any existing DisplayLink or EVDI installation first. The installer will
-refuse to merge with another driver stack because doing so would make safe
-rollback unreliable.
-
-Run the no-change compatibility check:
+## Local safety check and installation
 
 ```bash
-unzip aoc-i1659fwux-rpi-displaylink-driver-0.2.1.zip
-cd aoc-i1659fwux-rpi-displaylink-driver-0.2.1
 sudo ./install.sh --check-only
-```
-
-## Install
-
-```bash
 sudo ./install.sh
+sudo reboot
 ```
 
-Optional modes:
+Options:
 
 ```text
 --check-only                 Check compatibility without changing the system.
 --reinstall                  Remove this package's prior installation first.
---no-start                   Install without starting the service this boot.
+--no-start                   Install the broker but do not start it this boot.
 --force-unsupported-kernel   Permit an out-of-range kernel for testing only.
 ```
 
-The installer does not reboot. If the monitor is already connected, it attempts
-to start and verify the driver in the current boot. A normal manual reboot may
-be needed so EVDI is present before the compositor begins; the script will say
-so without changing the session configuration.
-
-## Check status
-
-From the extracted bundle:
-
-```bash
-sudo ./status.sh
-```
-
-After installation:
+## Status
 
 ```bash
 sudo /var/lib/aoc-i1659fwux-rpi-displaylink/status.sh
 ```
 
-The status report includes:
-
-- Raspberry Pi model, OS, architecture, and kernel;
-- detection of USB ID `17e9:ff10`;
-- EVDI module and DKMS state;
-- isolated systemd-service status and recent log;
-- current compositor/session process;
-- EVDI DRM connectors and exposed modes;
-- AArch64 runtime and shared-library resolution.
+The report shows the broker, desktop request heartbeat, boot safety block,
+DisplayLinkManager, EVDI, DRM connector and native `1920x1080` mode.
 
 ## Uninstall
 
 ```bash
 sudo /var/lib/aoc-i1659fwux-rpi-displaylink/uninstall.sh
+sudo reboot
 ```
 
-or, from the extracted bundle:
+Dependencies are retained because another program may use them. The uninstaller
+does not edit login or desktop configuration.
 
-```bash
-sudo ./uninstall.sh
-```
+## Proprietary archive and EULA
 
-The uninstaller removes only this package's recorded service, udev/module files,
-AArch64 runtime, EVDI DKMS version, and source directory. If `/etc/modprobe.d/evdi.conf`
-existed before installation, its exact prior copy is restored.
+The proprietary Synaptics binary is not redistributed in this repository. The
+installer downloads the official DisplayLink 6.3 Ubuntu archive after the user
+types `AGREE`, verifies its pinned SHA-256, and extracts it without running the
+vendor installation routine.
 
-Dependency packages are intentionally retained because removing them could
-break other software. The uninstaller does not change login/session settings or
-reboot. If EVDI is still held by the running graphical session, its in-memory
-copy disappears at the next normal reboot.
-
-## Hardware validation checklist
-
-1. Run `sudo ./install.sh --check-only` and resolve every reported conflict.
-2. Record `systemctl get-default` and the Pi's current login/autologin behaviour.
-3. Install with the AOC monitor disconnected.
-4. Confirm the normal primary display reaches the desktop exactly as before.
-5. Connect the I1659FWUX to a USB 3 port or a properly powered USB 3 hub.
-6. Run the installed `status.sh`.
-7. Confirm USB ID `17e9:ff10`, a running service, an EVDI connector, and
-   `1920x1080` in that connector's modes.
-8. Reboot once manually and confirm the original login behaviour is unchanged.
-9. Test disconnect and reconnect without restarting the display manager.
-10. Uninstall and confirm the original system behaviour remains intact.
-
-## Logs and recovery data
+For offline installation, place the unmodified archive at:
 
 ```text
-/var/log/aoc-i1659fwux-rpi-displaylink/
-/var/lib/aoc-i1659fwux-rpi-displaylink/
+vendor/DisplayLink-USB-Graphics-Software-for-Ubuntu-6.3.zip
 ```
 
-If installation fails, the partial driver is removed and diagnostics are moved
-to a timestamped directory under:
+## Compatibility and validation
 
-```text
-/var/backups/aoc-i1659fwux-rpi-displaylink-failed-*
-```
+Target environment:
+
+- Raspberry Pi 4 or Raspberry Pi 5;
+- Raspberry Pi OS/Raspbian Debian base;
+- `aarch64` kernel and userland;
+- systemd, LightDM or another local graphical login, and XDG autostart;
+- Linux 4.15 through 6.15 unless explicitly overridden;
+- matching headers for the running kernel.
+
+The package has passed Bash syntax, archive-integrity, embedded-payload,
+protected-path rollback and simulated greeter/authenticated-session/broker
+checks. It still requires physical validation on the target Pi and monitor.

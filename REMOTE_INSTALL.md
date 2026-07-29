@@ -1,64 +1,48 @@
-# GitHub Remote Installation
+# GitHub remote installation
 
-This repository includes a self-contained `remote-install.sh` entry point for
-installation directly from GitHub with `curl`.
-
-The remote entry point does not replace, rewrite, or duplicate the installation
-logic. It extracts a checksum-verified copy of the original CODELOCK package and
-runs its unchanged `install.sh`. All installer options, platform checks, EULA
-acceptance, protected-path safeguards, rollback behaviour, and exit codes remain
-the same as a local installation.
-
-## Upload to GitHub
-
-Upload the complete contents of this directory to the root of a GitHub
-repository. Keep `remote-install.sh` executable.
-
-## Remote install
-
-Replace `OWNER` and `REPOSITORY` with the GitHub account and repository name:
+The repository is already configured for:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh" | sudo bash
+curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
 ```
 
-The Synaptics EULA prompt remains interactive. The remote entry point reconnects
-the unchanged local installer to the terminal so the user can type `AGREE` just
-as they would during a local installation.
-
-## Remote compatibility check
+or:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh" | sudo bash -s -- --check-only
+wget -qO- https://raw.githubusercontent.com/comp6062/display-driver/main/remote-install.sh | sudo bash
 ```
 
-## Forward local installer options
+`remote-install.sh` is self-contained. It reconstructs a checksummed embedded
+copy of the package, verifies it, runs `install.sh --check-only`, and proceeds to
+the interactive installation only when the safety check passes.
 
-Arguments after `bash -s --` are passed directly and unchanged to `install.sh`:
+The EULA response is read from `/dev/tty`, so `AGREE` can be entered even when
+the script is piped to `sudo bash`.
+
+## Existing login-loop revision
+
+A Pi with the earlier pre-login EVDI revision must be repaired and rebooted
+before installing this revision:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh" | sudo bash -s -- --reinstall
+curl -fsSL https://raw.githubusercontent.com/comp6062/display-driver/main/repair-login.sh | sudo bash
+sudo reboot
 ```
 
-```bash
-curl -fsSL "https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh" | sudo bash -s -- --no-start
+Then run the normal remote installation command and reboot once more.
+
+## Upload layout
+
+Upload all files from the ZIP directly to the root of the
+`comp6062/display-driver` repository. In particular, these files must be at the
+repository root:
+
+```text
+remote-install.sh
+repair-login.sh
+install.sh
+uninstall.sh
+status.sh
+session-broker.sh
+session-request.sh
 ```
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/OWNER/REPOSITORY/main/remote-install.sh" | sudo bash -s -- --force-unsupported-kernel
-```
-
-## Branch name
-
-The examples use GitHub's common `main` branch. If the repository uses another
-branch, replace `main` in the raw GitHub URL with that branch name.
-
-## Integrity behaviour
-
-Before running anything from the package, `remote-install.sh` verifies:
-
-1. the SHA-256 checksum of its embedded original package archive; and
-2. the SHA-256 checksum of the extracted original `install.sh`.
-
-It stops without running the installer if either check fails. Temporary files
-are removed when the remote entry point exits.

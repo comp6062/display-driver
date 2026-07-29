@@ -12,6 +12,8 @@ SAFE_UNIT_PATH="/etc/systemd/system/${SAFE_UNIT}"
 UDEV_RULE_PATH="/etc/udev/rules.d/99-aoc-i1659fwux-displaylink.rules"
 MODULE_LOAD_PATH="/etc/modules-load.d/aoc-i1659fwux-evdi.conf"
 EVDI_MODPROBE_PATH="/etc/modprobe.d/evdi.conf"
+AUTOSTART_PATH="/etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop"
+RUNTIME_DIR="/run/aoc-i1659fwux-displaylink"
 KEEP_BACKUP=0
 
 log() {
@@ -31,9 +33,10 @@ usage() {
   cat <<'USAGE'
 Usage: sudo ./uninstall.sh [--keep-backup]
 
-Removes this package's DisplayLink user-space files, isolated service, exact
-AOC udev rule, and EVDI DKMS registration. It restores any evdi.conf file that
-existed before installation. Dependency packages are deliberately retained.
+Removes this package's DisplayLink user-space files, post-login broker,
+desktop request entry, exact AOC udev rule, and EVDI DKMS registration. It
+restores any evdi.conf file that existed before installation. Dependency
+packages are deliberately retained.
 USAGE
 }
 
@@ -95,9 +98,13 @@ main() {
   chmod 0640 "$log_file"
   exec > >(tee -a "$log_file") 2>&1
 
-  log "Stopping and removing the isolated AOC DisplayLink service."
+  log "Stopping and removing the post-login AOC DisplayLink broker."
   systemctl disable --now "${SAFE_UNIT}" >/dev/null 2>&1 || true
-  rm -f -- "${SAFE_UNIT_PATH}"
+  pkill -TERM -f '^/opt/displaylink/DisplayLinkManager$' >/dev/null 2>&1 || true
+  sleep 1
+  pkill -KILL -f '^/opt/displaylink/DisplayLinkManager$' >/dev/null 2>&1 || true
+  rm -f -- "${SAFE_UNIT_PATH}" "${AUTOSTART_PATH}"
+  rm -rf -- "${RUNTIME_DIR}"
   systemctl daemon-reload
 
   remove_evdi
@@ -123,7 +130,7 @@ main() {
 
   log "Uninstallation completed."
   log "Dependency packages were retained to avoid removing software another program may use."
-  log "No login, authentication, network, boot, compositor, or desktop-session setting was changed."
+  log "No login, authentication, network, boot, compositor selection, or unrelated desktop-session setting was changed."
   log "No automatic reboot was performed."
 }
 

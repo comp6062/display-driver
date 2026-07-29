@@ -6,6 +6,8 @@ PACKAGE_NAME="aoc-i1659fwux-rpi-displaylink"
 STATE_DIR="/var/lib/${PACKAGE_NAME}"
 SAFE_UNIT="aoc-i1659fwux-displaylink.service"
 AOC_USB_ID="17e9:ff10"
+RUNTIME_DIR="/run/aoc-i1659fwux-displaylink"
+AUTOSTART_PATH="/etc/xdg/autostart/aoc-i1659fwux-displaylink.desktop"
 
 section() {
   printf '\n== %s ==\n' "$1"
@@ -54,8 +56,30 @@ if command -v dkms >/dev/null 2>&1; then
   dkms status 2>/dev/null | grep '^evdi/' || echo "DKMS: no EVDI registration found"
 fi
 
-section "DisplayLink service"
+section "Post-login DisplayLink broker"
 systemctl status "${SAFE_UNIT}" --no-pager 2>/dev/null || true
+printf 'Desktop request entry: %s\n' "$([[ -f "${AUTOSTART_PATH}" ]] && echo installed || echo missing)"
+if pgrep -f '^/opt/displaylink/DisplayLinkManager$' >/dev/null 2>&1; then
+  echo "DisplayLinkManager: running after an authenticated desktop request"
+else
+  echo "DisplayLinkManager: not running"
+fi
+if [[ -d "${RUNTIME_DIR}" ]]; then
+  for request in "${RUNTIME_DIR}"/session-*.request; do
+    [[ -e "$request" ]] || continue
+    request_age=$(( $(date +%s) - $(stat -c '%Y' "$request" 2>/dev/null || echo 0) ))
+    printf 'Request: %s owner=%s age=%ss\n' \
+      "$(basename -- "$request")" \
+      "$(stat -c '%u' "$request" 2>/dev/null || echo unknown)" \
+      "$request_age"
+  done
+  for blocked in "${RUNTIME_DIR}"/blocked-*; do
+    [[ -e "$blocked" ]] || continue
+    printf 'Boot safety block: %s: %s\n' \
+      "$(basename -- "$blocked")" \
+      "$(cat "$blocked" 2>/dev/null || true)"
+  done
+fi
 
 section "Graphical session"
 for process in labwc wayfire Xorg Xwayland weston mutter kwin_wayland; do
@@ -120,5 +144,5 @@ else
   echo "No installation state found."
 fi
 
-section "Recent service log"
+section "Recent broker log"
 journalctl -u "${SAFE_UNIT}" -n 30 --no-pager 2>/dev/null || true
